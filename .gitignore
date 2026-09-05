@@ -1,0 +1,44 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Alloy bytecode
+*.ax
+!funcs.ax
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Env / secrets
+.env
+.env.local
+
+# Python sidecar artifacts
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Logs & temp
+*.log
+*.tmp
+alloy_shm_*.tmp
+alloy_py_sidecar_*.tmp
+-o
+
+# Bench output
+bench/results/
+
+# Coverage
+lcov.info
+coverage/

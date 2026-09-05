@@ -1,0 +1,61 @@
+// Map/Set methods via the prototype — shared natives with real `this`.
+// Node's keys()/values()/entries() return iterators; alloy returns array
+// snapshots — the helper normalizes both to the same string.
+function j(x) { return (x.join ? x : Array.from(x)).map(function (e) { return e.join ? e.join(":") : e; }).join("|"); }
+
+let m = new Map();
+m.set("a", 1);
+m.set("b", 2);
+print(m.get("a"), m.get("b"));
+print(m.has("a"), m.has("z"));
+print(m.size);
+print(m.set("a", 99) === m);
+print(m.get("a"));
+print(j(m.keys()));
+print(j(m.values()));
+print(j(m.entries()));
+m.delete("b");
+print(m.size, m.has("b"));
+print(j(m.keys()));
+m.clear();
+print(m.size, j(m.keys()));
+
+// prototype surface — methods exist once and are shared
+print(typeof Map.prototype.get, typeof Map.prototype.set, typeof Map.prototype.forEach);
+print(typeof Map.prototype.add);
+print(typeof Set.prototype.add, typeof Set.prototype.has, typeof Set.prototype.delete);
+print(Map.prototype.get === Map.prototype.get);
+print(m instanceof Map, m instanceof Set);
+print(Map.prototype.get === m.get);
+
+// two instances share the same method objects
+let m2 = new Map();
+m2.set("x", 10);
+print(m.get("a") === undefined, m2.get("x"));
+print(Object.keys(m).length);
+
+// forEach through the prototype, with map identity arg
+let acc = [];
+m2.forEach(function (v, k, mm) { acc.push(k + "=" + v + (mm === m2)); });
+print(acc.join("|"));
+
+// Set
+let s = new Set();
+s.add(1);
+s.add(2);
+s.add(3);
+print(s.size, s.has(2), s.has(9));
+print(j(s.values()));
+print(j(s.entries()));
+print(s.add(1) === s, s.size);
+acc = [];
+s.forEach(function (v, k, ss) { acc.push(v + ":" + (ss === s)); });
+print(acc.join("|"));
+print(s.delete(2), s.size, s.has(2));
+s.clear();
+print(s.size, j(s.values()));
+
+// size via the prototype's own instances after churn
+let big = new Map();
+for (let i = 0; i < 100; i++) { big.set("k" + i, i); }
+print(big.size, big.get("k50"), big.has("k99"), big.has("k100"));

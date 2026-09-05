@@ -1,0 +1,59 @@
+// Object.keys/values/entries — enumeration order and coercion.
+// Arrays are .join()ed so both engines print byte-identically.
+function j(a) { return a.map(function (x) { return Array.isArray(x) ? x.join(",") : String(x); }).join("|"); }
+function J(a) { return a.join("|"); }
+
+let o = {};
+o.b = 1;
+o["2"] = 20;
+o.a = 3;
+o["0"] = 4;
+o["10"] = 5;
+o.c = 6;
+print(J(Object.keys(o)));
+print(J(Object.values(o)));
+print(J(Object.entries(o).map(function (e) { return e.join(":"); })));
+
+// 4294967295 is NOT an array index — it follows string insertion order.
+let big = {};
+big["4294967295"] = 1;
+big.a = 2;
+big["100"] = 3;
+print(J(Object.keys(big)));
+
+// delete skips tombstones, order preserved.
+let d = {};
+d.x = 1;
+d.y = 2;
+d.z = 3;
+delete d.y;
+print(J(Object.keys(d)));
+
+// primitives
+print(J(Object.keys(5)));
+print(J(Object.keys(true)));
+print(J(Object.keys("ab")));
+print(J(Object.values("ab")));
+print(J(Object.entries("ab").map(function (e) { return e.join(":"); })));
+print(J(Object.keys("")));
+
+// object from literal — insertion order
+let lit = { z: 1, "3": 2, y: 3, "1": 4 };
+print(J(Object.keys(lit)));
+print(Object.entries(lit).length);
+
+// nested + reuse in expressions
+let m = { p: 1 };
+let ks = Object.keys(m);
+print(ks.length, ks[0]);
+print(Object.values(m)[0]);
+print(Object.entries(m)[0][0], Object.entries(m)[0][1]);
+
+// re-assignment keeps position
+let u = {};
+u.first = 1;
+u.second = 2;
+u.first = 99;
+print(J(Object.keys(u)), J(Object.values(u)));
+
+// null / undefined throw (verified separately below in alloy's style)

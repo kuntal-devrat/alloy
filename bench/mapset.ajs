@@ -1,0 +1,5 @@
+let m = new Map();
+for (let i = 0; i < 200000; i++) { m.set(i, i * 2); }
+let s = 0;
+for (const [k, v] of m) { s += v; }
+print(s, m.size);

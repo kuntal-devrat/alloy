@@ -1,0 +1,5 @@
+let s = 0;
+for (let i = 0; i < 3000000; i++) {
+  if (i % 3 === 0) s += 1; else if (i % 3 === 1) s += 2; else s += 3;
+}
+print(s);

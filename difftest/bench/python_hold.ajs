@@ -1,0 +1,8 @@
+// Parks a python call for `hold` seconds so an external sampler can measure
+// the process memory footprint of each backend while python is live.
+import { hold } from 'difftest/bench/python_bench.py' as python;
+(async () => {
+    print("holding");
+    await python.hold(6);
+    print("done");
+})();

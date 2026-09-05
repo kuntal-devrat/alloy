@@ -1,0 +1,77 @@
+// for-of and spread directly on Map/Set — synthetic iterator.
+let m = new Map();
+m.set("a", 1);
+m.set("b", 2);
+m.set("c", 3);
+
+// for-of yields [k, v] pairs in insertion order
+let out = [];
+for (let [k, v] of m) { out.push(k + "=" + v); }
+print(out.join("|"));
+
+// non-destructuring for-of over a Map yields the pair arrays
+let pairs = [];
+for (let p of m) { pairs.push(p[0] + ":" + p[1]); }
+print(pairs.join("|"));
+
+// spread a Map into an array — [k, v] pairs
+let sp = [...m];
+print(sp.length, sp[0][0], sp[0][1], sp[2][0], sp[2][1]);
+print(sp.map(function (e) { return e.join(":"); }).join("|"));
+
+// spread a Map as call arguments
+function firsts(...args) {
+  return args.map(function (a) { return a[0]; }).join("|");
+}
+print(firsts(...m));
+
+// empty Map
+let e = new Map();
+print([...e].length);
+let cnt = 0;
+for (let x of e) { cnt++; }
+print(cnt);
+
+// Set: for-of yields elements
+let s = new Set();
+s.add(10);
+s.add(20);
+s.add(30);
+let sv = [];
+for (let x of s) { sv.push(x); }
+print(sv.join("|"));
+
+// spread a Set
+print([...s].join("|"));
+
+// Set destructuring header (single name)
+let sum = 0;
+for (let x of s) { sum += x; }
+print(sum);
+
+// mixed into array literal
+let mixed = [1, ...m.keys(), ...s];
+print(mixed.join("|"));
+
+// nested Map values destructure
+let m2 = new Map();
+m2.set("p", [7, 8]);
+m2.set("q", [9, 10]);
+let acc = [];
+for (let [k, [x, y]] of m2) { acc.push(k + ":" + x + "," + y); }
+print(acc.join("|"));
+
+// churn: iteration after deletes keeps insertion order of survivors
+let m3 = new Map();
+for (let i = 0; i < 5; i++) { m3.set("k" + i, i); }
+m3.delete("k1");
+m3.delete("k3");
+let acc3 = [];
+for (let [k, v] of m3) { acc3.push(k + v); }
+print(acc3.join("|"));
+print([...m3].map(function (e) { return e.join(""); }).join("|"));
+
+// for-of over an array still works (pass-through)
+let av = [];
+for (let x of [5, 6, 7]) { av.push(x); }
+print(av.join("|"));

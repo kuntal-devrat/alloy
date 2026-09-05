@@ -1,0 +1,67 @@
+// arguments: length, indexing, iteration — Node-verified.
+function sum() {
+  let t = 0;
+  for (let a of arguments) { t += a; }
+  return t;
+}
+print(sum(1, 2, 3, 4));
+print(sum());
+
+function show() {
+  print(arguments.length);
+  print(arguments[0], arguments[1], arguments[2]);
+  print([...arguments].join("|"));
+}
+show(10, 20, 30);
+
+// extra args beyond params are visible
+function two(a, b) {
+  return arguments.length + ":" + arguments[2] + ":" + a + b;
+}
+print(two(1, 2, 3, 4));
+
+// missing params do not inflate length
+function three(a, b, c) {
+  return arguments.length + ":" + (arguments[2] === undefined) + ":" + a;
+}
+print(three(9));
+print(three());
+
+// iteration matches for-of semantics
+function iter() {
+  let out = [];
+  for (let i = 0; i < arguments.length; i++) { out.push(arguments[i] * 2); }
+  return out.join("|");
+}
+print(iter(1, 2, 3));
+
+// nested calls: innermost arguments
+function inner() { return arguments.length; }
+function outer() { return inner(5, 6) + ":" + arguments.length; }
+print(outer(1, 2, 3));
+
+// recursion: each frame has its own arguments
+function fact(n) {
+  if (n <= 1) { return 1; }
+  return n * fact(n - 1) + arguments.length * 0;
+}
+print(fact(5));
+
+// a local named arguments shadows it
+function shadow() {
+  let arguments = 42;
+  return arguments;
+}
+print(shadow());
+
+// arguments iterates into array contexts
+function snapshot() {
+  return [...arguments].join("-");
+}
+print(snapshot(7, 8, 9));
+
+// spread from arguments
+function spreadish() {
+  return Math.max(...arguments);
+}
+print(spreadish(4, 9, 2, 7));

@@ -1,0 +1,66 @@
+// Optional chaining differential — every shape
+let o = { a: { b: 42 }, m: function(x, y) { return this.a.b + x + y; }, arr: [10, 20, 30], n: null, z: 0, s: "hi" };
+let undef = undefined;
+
+// prop access
+print(o?.a.b);                 // 42
+print(o?.x?.y);                // undefined
+print(undef?.a);               // undefined
+print(o?.n?.b);                // undefined
+print(o?.z);                   // 0
+
+// index access
+print(o?.["a"]?.b);            // 42
+print(o?.arr?.[1]);            // 20
+print(undef?.[0]);             // undefined
+print(o?.n?.[0]);              // undefined
+
+// calls
+function f(x, y) { return x * 10 + y; }
+print(f?.(3, 4));              // 34
+let fnull = null;
+print(fnull?.(3, 4));          // undefined
+print(undef?.(1));             // undefined
+
+// method calls with this binding
+print(o.m?.(1, 2));            // 45
+let o2 = { n: null };
+print(o2?.m?.(1));             // undefined (m undefined on o2? no — o2 has no m: undefined?.(1))
+print(o?.n?.m?.(1));           // undefined
+print(o?.m?.(1));              // o.m exists: 43
+
+// short-circuit: args must NOT evaluate when receiver nullish
+let calls = 0;
+function bump() { calls++; return 5; }
+print(null?.m?.(bump()));      // undefined, bump NOT called
+print(calls);                  // 0
+print(o?.m?.(bump()));         // 48 (this.a.b=42 + 5 + 1)
+print(calls);                  // 1
+
+// chained plain call then member
+function g() { return { p: 7 }; }
+print(g?.().p);                // 7
+let gnull = null;
+print(gnull?.().p);            // undefined
+print(gnull?.()?.p);           // undefined
+
+// member then call then member
+print(o?.arr?.[1]?.toString?.());  // "20"
+print(undef?.arr?.[1]);            // undefined
+
+// spread in optional call
+function sum(...xs) { let t = 0; for (let x of xs) { t += x; } return t; }
+print(sum?.(1, 2, 3));         // 6
+print(sum?.(...[1, 2, 3]));    // 6
+let snull = null;
+print(snull?.(...[1, 2]));     // undefined
+
+// nested optional chains in expressions
+
+// assignment target must NOT be optional (compile error) — not tested here
+
+// statement-position chain discards cleanly
+o?.a?.b;
+undef?.a?.b;
+gnull?.().p;
+print("after-discard");        // marker

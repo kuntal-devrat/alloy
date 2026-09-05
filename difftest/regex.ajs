@@ -1,0 +1,113 @@
+// ---- basic exec/test ----
+let r = /ab+c/i;
+print(r.test("xabbbc"), r.test("xabbc"), r.test("nope"));
+let m = /(\d+)-(\d+)/.exec("id 12-34 end");
+print(m[0], m[1], m[2], m.index, m.input, m.length);
+print(/a/.exec("xyz"));
+
+// ---- global exec loop + lastIndex ----
+let g = /\d+/g;
+let s = "a12b345";
+let m2;
+let out = [];
+while ((m2 = g.exec(s)) !== null) { out.push(m2[0] + "@" + m2.index); }
+print(out.join(" "));
+print(g.lastIndex);
+let g2 = /x/g;
+print(g2.lastIndex, g2.exec("ab"), g2.lastIndex);
+
+// ---- empty-match advance ----
+let e = /(?:)/g;
+let n = 0;
+while (e.exec("ab") !== null) { n++; if (n > 10) break; }
+print("empty-advance:", n);
+
+// ---- sticky ----
+let y = /b/y;
+y.lastIndex = 1;
+print(y.exec("abc") === null, y.lastIndex);
+y.lastIndex = 2;
+print(y.exec("abc") === null);
+
+// ---- String.match ----
+print("abc123def456".match(/\d+/g).join(","));
+print("abc123def456".match(/\d+/).length, "abc123def456".match(/\d+/)[0]);
+print("abcdef".match(/x/));
+print("abc".match("b")[0], "abc".match("b").index);
+print("aab".match(/a/)[0], "aab".match(/a/).index);
+
+// ---- String.replace: string, $refs, function, global, captures ----
+print("hello world".replace("o", "0"));
+print("hello world".replace(/o/g, "0"));
+print("a1b2c3".replace(/(\d)/g, "<$1>"));
+print("John Smith".replace(/(\w+) (\w+)/, "$2, $1"));
+print("abc".replace(/b/, "[$&][$`][$']"));
+print("x1y2".replace(/(\d)/g, function (m, d) { return "(" + d + ")"; }));
+print("abc".replace(/b/, function (m, off, str) { return off + ":" + str.length; }));
+print("aaa".replace(/a/g, function () { return "Z"; }));
+print("price $5".replace(/\$\d+/, "$$99"));
+print("aaa".replace(/(a)/g, "$$$&"));
+print("no match".replace(/q/g, "X"));
+print("one two".replace(/(o)(n)(e)/, "$3$2$1"));
+
+// ---- String.search ----
+print("2024-01-15".search(/\d+/));
+print("abc".search(/x/));
+print("abc".search("b"));
+
+// ---- String.split: regex with captures, empty, groups ----
+print("a,b,c".split(/,/).join("|"));
+print("a1b2c".split(/(\d)/).join("|"));
+print("a1b2c".split(/\d/).join("|"));
+print("abc".split(/(?:)/).join("|"));
+print("".split(/./).length);
+print("a b  c".split(/ +/).join("|"));
+print("ab".split(/(a)/).join("|"));
+
+// ---- flags / properties ----
+let fr = /x/gi;
+print(fr.source, fr.flags, fr.global, fr.ignoreCase, fr.multiline, fr.dotAll, fr.sticky);
+print(fr.toString());
+print(typeof fr);
+let ms = /^a.b$/m;
+print(ms.multiline, ms.test("z\naqb"), ms.test("aqb"));
+print(/a.b/s.test("a\nb"));
+
+// ---- character classes, anchors, quantifiers, alternation ----
+print(/[a-z]+/.exec("123abc456")[0]);
+print(/[^0-9]+/.exec("123abc456")[0]);
+print(/^\d+$/.test("12345"), /^\d+$/.test("12a45"));
+print(/^(ab|cd)+$/.test("cdab"), /^(ab|cd)+$/.test("cdx"));
+print(/a{2,3}/.exec("aaaa")[0]);
+print(/<.+>/.exec("<a><b>")[0]);
+print(/<.+?>/.exec("<a><b>")[0]);
+print(/\bword\b/.test("a word!"), /\bword\b/.test("sword"));
+print(/\d{3}-\d{2}-\d{4}/.test("123-45-6789"));
+print(/[aeiou]+/i.exec("HELLO")[0]);
+print(/\s+/.exec("a \t b")[0].length);
+print(/\.\d+/.exec("3.14159")[0]);
+print(/\\d/.test("\\d"), /\\d/.test("5"));
+
+// ---- backreferences ----
+print(/(ab)\1/.exec("abab")[0]);
+print(/(\w+) \1/.exec("hi hi there")[0]);
+print(/(a|b)\1/.test("aa"), /(a|b)\1/.test("bb"), /(a|b)\1/.test("ab"));
+
+// ---- case-insensitive + unicode-ish ----
+// NOTE: non-ASCII case folding (`hÉllo`/`héllo`) is a documented
+// engine limit (ASCII-only folding), so it is not asserted here.
+print(/😀/.test("a😀b"));
+print(/"([^"]*)"/.exec('say "hi" there')[1]);
+
+// ---- regex as values: identity, no mutation across literals ----
+let q1 = /z/g, q2 = /z/g;
+print(q1 === q2);
+q1.lastIndex = 3;
+print(q1.lastIndex, q2.lastIndex);
+
+// ---- in loop conditions / statements ----
+let count = 0;
+for (let i = 0; i < 3; i++) {
+  if (/[02468]/.test("" + i)) count++;
+}
+print(count);

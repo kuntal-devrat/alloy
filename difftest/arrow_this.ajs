@@ -1,0 +1,4 @@
+let o = { v: 5, f: function() { let g = () => this.v; return g(); } };
+print(o.f());
+function outer(x) { return () => x; }
+print(outer(42)());

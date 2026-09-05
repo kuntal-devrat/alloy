@@ -1,0 +1,50 @@
+// for...of over non-iterables throws Node's TypeError.
+// (Node's `e` is an Error with .message; alloy throws a plain string.)
+function t(fn) { try { fn(); print("no-throw"); } catch (e) { print(e.toString ? e.toString() : e); } }
+
+// Inline literals: V8's message uses the source text, which for a literal is
+// the value itself — exact match with alloy's value-based display.
+t(function () { for (let x of {}) {} });
+t(function () { for (let x of 5) {} });
+t(function () { for (let x of 0) {} });
+t(function () { for (let x of null) {} });
+t(function () { for (let x of undefined) {} });
+t(function () { for (let x of true) {} });
+t(function () { for (let x of 3.5) {} });
+
+// Variables: V8 prints the variable name (source text); alloy prints the
+// value. Both throw a TypeError — assert the throw shape only.
+let o = {};
+let n = 5;
+let nu = null;
+let b = true;
+t(function () { for (let x of o) {} });
+t(function () { for (let x of n) {} });
+t(function () { for (let x of nu) {} });
+t(function () { for (let x of b) {} });
+
+// iterables still work
+let acc = [];
+for (let x of [1, 2, 3]) { acc.push(x); }
+print(acc.join("|"));
+let sacc = [];
+for (let c of "ab") { sacc.push(c); }
+print(sacc.join("|"));
+let m = new Map();
+m.set("a", 1);
+let macc = [];
+for (let [k, v] of m) { macc.push(k + v); }
+print(macc.join("|"));
+
+// the throw is catchable and the loop never runs
+let ran = 0;
+t(function () { for (let x of 5) { ran++; } });
+print(ran);
+
+// a non-iterable value in a variable that later becomes an array
+let dyn = 7;
+t(function () { for (let x of dyn) {} });
+dyn = [9];
+let dacc = [];
+for (let x of dyn) { dacc.push(x); }
+print(dacc.join("|"));

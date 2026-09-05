@@ -1,0 +1,6 @@
+let m = new Map();
+for (let i = 0; i < 50000; i++) { m.set(i, i); }
+print(m.size);
+let m2 = new Map();
+for (let i = 0; i < 100000; i++) { m2.set(i, i); }
+print(m2.size);

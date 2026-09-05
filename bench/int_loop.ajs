@@ -1,0 +1,4 @@
+// int ALU + fused register ops
+let s = 0;
+for (let i = 0; i < 2000000; i++) { s = (s + i * 3) % 1000003; }
+print(s);

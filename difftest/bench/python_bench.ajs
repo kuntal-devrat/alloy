@@ -1,0 +1,47 @@
+// python sidecar benchmark: cold/warm call latency + 10MB zero-copy handoff.
+// Run with the CLI in either backend mode:
+//   child:  ./alloy difftest/bench/python_bench.ajs
+//   embed:  ALLOY_PYTHON_EMBED=1 ./alloy difftest/bench/python_bench.ajs
+// Needs ALLOY_SHM_CAP >= 16777216 for the 10MB buffer.
+const t_start = Date.now();
+import { add, sum_f32 } from 'difftest/bench/python_bench.py' as python;
+
+(async () => {
+    // 1) Cold python: interpreter/child startup + import (t1 - t_start), then
+    //    the first call (t2 - t1). Together they are the full cold path.
+    const t1 = Date.now();
+    const r = await python.add(1, 2);
+    const t2 = Date.now();
+    const import_ms = t1 - t_start;
+    const first_call_ms = t2 - t1;
+
+    // 2) Warm per-call latency: transport only, 100 calls.
+    const t3 = Date.now();
+    for (let i = 0; i < 100; i++) {
+        await python.add(i, 1);
+    }
+    const warm_ms = (Date.now() - t3) / 100;
+
+    // 3) 10MB handoff: build 2.5M f32 values, allocate into the shared
+    //    segment, hand the pointer to python, sum them back. The python
+    //    loop dominates; the delta between backends is the transport.
+    const N = 2500000;
+    const t4 = Date.now();
+    const a = [];
+    for (let i = 0; i < N; i++) a.push(i % 17);
+    const t5 = Date.now();
+    const buf = memory.allocateFloat32Array(a);
+    const t6 = Date.now();
+    const s = await python.sum_f32(buf.ptr, N);
+    const t7 = Date.now();
+
+    print("check=" + (r === 3 ? "ok" : "BAD"));
+    print("import-ms=" + import_ms);
+    print("first-call-ms=" + first_call_ms);
+    print("cold-total-ms=" + (import_ms + first_call_ms));
+    print("warm-call-ms=" + warm_ms.toFixed(3));
+    print("js-build-ms=" + (t5 - t4));
+    print("alloc-ms=" + (t6 - t5));
+    print("handoff-ms=" + (t7 - t6));
+    print("sum=" + s.toFixed(0));
+})();

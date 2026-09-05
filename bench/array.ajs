@@ -1,0 +1,5 @@
+let a = [];
+for (let i = 0; i < 200000; i++) { a[i] = i * 2; }
+let s = 0;
+for (let i = 0; i < a.length; i++) { s += a[i]; }
+print(s, a.length);

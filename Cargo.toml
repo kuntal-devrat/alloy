@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "crates/alloy-core",
+    "crates/alloy-vm",
+    "crates/alloy-rt",
+    "crates/alloy-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+libc = "0.2"
+hashbrown = "0.14"
+
+# Interpreter hot loop: single codegen unit + thin LTO let the dispatch loop
+# and Value arithmetic inline aggressively. Costs build time, buys runtime.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = "debuginfo"
+
+# PGO: build with `RUSTFLAGS="-Cprofile-generate=/tmp/pgo" cargo build --release`
+# then `llvm-profdata merge -o /tmp/merged.profdata /tmp/pgo/*.profraw`
+# and rebuild with `RUSTFLAGS="-Cprofile-use=/tmp/merged.profdata"` for ~10-15% gain.
+
+[profile.bench]
+inherits = "release"
+debug = 1

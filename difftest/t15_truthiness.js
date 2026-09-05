@@ -1,0 +1,43 @@
+// t15: truthiness, typeof, strict equality, NaN/Infinity, short-circuiting,
+// chained assignment, ++/--, object/array edge reads.
+function t(v) { return v ? "T" : "F"; }
+print(t(0), t(1), t(-1), t(""), t("x"), t(null), t(undefined), t([]), t({}), t(NaN));
+print(typeof 1, typeof "s", typeof true, typeof undefined, typeof null, typeof [], typeof (() => 1), typeof NaN, typeof Infinity);
+print(NaN === NaN, NaN !== NaN, 1 / 0 === Infinity, -1 / 0 === -Infinity);
+print(0 && 1, 1 && 2, "" || "x", "y" || "z", null || undefined || "d");
+let chained = 0;
+let v1 = 5;
+let v2 = 10;
+chained = v1 = v2 = 20;
+print("chained", chained, v1, v2);
+let s = "abc";
+print(s.length, s[s.length - 1], s[10]);
+let n = 5;
+let pre = ++n;
+let post = n++;
+print("incdec", pre, post, n);
+let m = 10;
+m--;
+--m;
+print("dec", m);
+let o = { x: 1 };
+o.x += 10;
+o["y"] = 20;
+print("obj", o.x, o.y, o.z);
+let a = 1;
+a += 2;
+a *= 3;
+print("compound", a);
+let arr = [1, 2, 3];
+arr[1] += 10;
+arr[arr.length - 1] *= 2;
+print("arr-compound", arr[1], arr[2]);
+let g = 0;
+let h = 1;
+let res = (g = h = 2) + 1;
+print("assign-in-expr", res, g, h);
+print("str-vs-num", "5" === 5, "5" !== 5, "5" < 6, 6 < "5");
+let objKey = { "a-b": 1 };
+print("dash-key", objKey["a-b"]);
+let nestedObj = { level1: { level2: { value: 42 } } };
+print("deep-prop", nestedObj.level1.level2.value, nestedObj.level1.missing);

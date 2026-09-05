@@ -1,0 +1,14 @@
+[package]
+name = "alloy-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+alloy-rt = { path = "../alloy-rt" }
+alloy-vm = { path = "../alloy-vm" }
+alloy-core = { path = "../alloy-core" }
+tokio.workspace = true
+
+[[bin]]
+name = "alloy"
+path = "src/main.rs"

@@ -1,0 +1,10 @@
+[package]
+name = "alloy-rt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+alloy-core = { path = "../alloy-core" }
+alloy-vm = { path = "../alloy-vm" }
+tokio.workspace = true
+libc.workspace = true
