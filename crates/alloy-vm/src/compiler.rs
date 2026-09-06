@@ -3023,6 +3023,8 @@ fn is_native(name: &str) -> bool {
             | "clearTimeout" | "clearInterval" | "queueMicrotask" | "console" | "channel"
             | "spawn" | "Date" | "Math" | "JSON" | "Number" | "Object" | "Array" | "String"
             | "parseInt" | "parseFloat" | "isNaN" | "require" | "reload" | "sweepSegments"
+            | "fetchSync" | "crypto" | "URL" | "encodeURIComponent" | "decodeURIComponent"
+            | "encodeURI" | "decodeURI" | "btoa" | "atob"
             | "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError"
             | "EvalError" | "URIError" | "NaN" | "Infinity"
     )

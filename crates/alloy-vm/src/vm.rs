@@ -1939,7 +1939,9 @@ impl Vm {
             "Number", "Object", "Array", "String", "console", "setTimeout",
             "setInterval", "clearTimeout", "clearInterval", "queueMicrotask",
             "parseInt", "parseFloat", "isNaN", "Error", "TypeError", "RangeError",
-            "ReferenceError", "SyntaxError", "EvalError", "URIError",
+            "ReferenceError", "SyntaxError", "EvalError", "URIError", "fetchSync",
+            "crypto", "URL", "encodeURIComponent", "decodeURIComponent",
+            "encodeURI", "decodeURI", "btoa", "atob",
         ];
         let name = path.strip_prefix("alloy:").unwrap_or(path);
         if !BUILTINS.contains(&name) {
@@ -11319,8 +11321,540 @@ fn make_json_module() -> Value {
     Value::object(m)
 }
 
+// ---------------------------------------------------------------------------
+// Pure-Rust SHA-256 (FIPS 180-4), HMAC, base64, OS-seeded random.
+// No new dependencies: the runtime stays at tokio+libc+hashbrown so the
+// 1.6MB static binary story survives. Constant-time concerns don't apply
+// (JWT/HMAC comparison should still use the provided `timingSafeEqual`).
+// ---------------------------------------------------------------------------
+
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+fn sha256_bytes(input: &[u8]) -> [u8; 32] {
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let bit_len = (input.len() as u64).wrapping_mul(8);
+    let mut msg = Vec::with_capacity(((input.len() + 9 + 63) / 64) * 64);
+    msg.extend_from_slice(input);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA256_K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g; g = f; f = e; e = d.wrapping_add(t1);
+            d = c; c = b; b = a; a = t1.wrapping_add(t2);
+        }
+        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e); h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g); h[7] = h[7].wrapping_add(hh);
+    }
+    let mut out = [0u8; 32];
+    for (i, v) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    out
+}
+
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        let h = sha256_bytes(key);
+        k[..32].copy_from_slice(&h);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Vec::with_capacity(64 + msg.len());
+    inner.extend_from_slice(&ipad);
+    inner.extend_from_slice(msg);
+    let ih = sha256_bytes(&inner);
+    let mut outer = Vec::with_capacity(64 + 32);
+    outer.extend_from_slice(&opad);
+    outer.extend_from_slice(&ih);
+    sha256_bytes(&outer)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(H[(b >> 4) as usize] as char);
+        s.push(H[(b & 15) as usize] as char);
+    }
+    s
+}
+
+const B64_STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for w in bytes.chunks(3) {
+        let (a, b, c) = (w[0] as u32, *w.get(1).unwrap_or(&0) as u32, *w.get(2).unwrap_or(&0) as u32);
+        let n = (a << 16) | (b << 8) | c;
+        s.push(B64_STD[((n >> 18) & 63) as usize] as char);
+        s.push(B64_STD[((n >> 12) & 63) as usize] as char);
+        s.push(if w.len() > 1 { B64_STD[((n >> 6) & 63) as usize] as char } else { '=' });
+        s.push(if w.len() > 2 { B64_STD[(n & 63) as usize] as char } else { '=' });
+    }
+    s
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut vals = Vec::with_capacity(s.len());
+    for c in s.bytes() {
+        if c == b'=' { break; }
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b' ' | b'\n' | b'\r' | b'\t' => continue,
+            _ => return None,
+        };
+        vals.push(v);
+    }
+    let mut out = Vec::with_capacity(vals.len() * 3 / 4);
+    for w in vals.chunks(4) {
+        if w.len() < 2 { return None; }
+        let n = (w[0] as u32) << 18 | (w[1] as u32) << 12
+            | (*w.get(2).unwrap_or(&0) as u32) << 6 | (*w.get(3).unwrap_or(&0) as u32);
+        out.push((n >> 16) as u8);
+        if w.len() > 2 { out.push((n >> 8) as u8); }
+        if w.len() > 3 { out.push(n as u8); }
+    }
+    Some(out)
+}
+
+fn base64url_encode(bytes: &[u8]) -> String {
+    base64_encode(bytes).replace('+', "-").replace('/', "_").trim_end_matches('=').to_string()
+}
+
+/// OS-seeded random bytes via std's RandomState (seeded from OS entropy).
+/// Honest scope: suitable for sessions/CSRF/tokens, not FIPS key generation.
+fn os_random_bytes(n: usize) -> Vec<u8> {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = Vec::with_capacity(n);
+    let mut ctr: u64 = 0;
+    // Mix time + pid + address jitter per block so sequential calls differ
+    // even if RandomState repeats within a thread.
+    while out.len() < n {
+        let rs = RandomState::new();
+        let mut h1 = rs.build_hasher();
+        h1.write_usize(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as usize).unwrap_or(0).wrapping_add(ctr as usize));
+        h1.write_usize(std::process::id() as usize);
+        h1.write_usize(&out as *const Vec<u8> as usize);
+        ctr += 1;
+        out.extend_from_slice(&h1.finish().to_le_bytes());
+        let mut h2 = rs.build_hasher();
+        h2.write_usize(ctr as usize ^ 0x9E3779B97F4A7C15u64 as usize);
+        out.extend_from_slice(&h2.finish().to_le_bytes());
+    }
+    out.truncate(n);
+    out
+}
+
+/// JS encodeURIComponent: escape everything except A-Za-z0-9 `-_.!~*'()`.
+/// Non-ASCII is UTF-8 percent-encoded with uppercase hex, like V8.
+fn encode_uri_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' => out.push(*b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+fn make_crypto_module() -> Value {
+    let sha256 = Value::native(Arc::new(|args, _vm| {
+        let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        Value::string(hex_encode(&sha256_bytes(s.as_bytes())))
+    }));
+    let hmac = Value::native(Arc::new(|args, _vm| {
+        let k = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let m = args.get(1).map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        Value::string(hex_encode(&hmac_sha256(k.as_bytes(), m.as_bytes())))
+    }));
+    let random = Value::native(Arc::new(|args, _vm| {
+        let n = args.first().map(|v| v.to_number() as usize).unwrap_or(16).clamp(1, 1024);
+        Value::string(hex_encode(&os_random_bytes(n)))
+    }));
+    let b64e = Value::native(Arc::new(|args, _vm| {
+        let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        Value::string(base64_encode(s.as_bytes()))
+    }));
+    let b64d = Value::native(Arc::new(|args, vm| {
+        let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        match base64_decode(&s) {
+            Some(b) => Value::string(String::from_utf8_lossy(&b).into_owned()),
+            None => {
+                vm.throw_exception(Value::string("Error: invalid base64".to_string()));
+                Value::undefined()
+            }
+        }
+    }));
+    let b64ue = Value::native(Arc::new(|args, _vm| {
+        let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        Value::string(base64url_encode(s.as_bytes()))
+    }));
+    // timingSafeEqual(a, b): length + content compare for HMAC/signature checks.
+    let tse = Value::native(Arc::new(|args, _vm| {
+        let a = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let b = args.get(1).map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let (ab, bb) = (a.as_bytes(), b.as_bytes());
+        if ab.len() != bb.len() { return Value::bool(false); }
+        let mut diff = 0u8;
+        for (x, y) in ab.iter().zip(bb.iter()) { diff |= x ^ y; }
+        Value::bool(diff == 0)
+    }));
+    // HMAC-SHA256 straight to base64url (for JWT signatures): avoids the
+    // lossy hex->binary-string round-trip (chars >=128 are multi-byte UTF-8
+    // in engine strings, so a JS-side hex decode would corrupt the bytes).
+    let hmac_b64u = Value::native(Arc::new(|args, _vm| {
+        let k = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let m = args.get(1).map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        Value::string(base64url_encode(&hmac_sha256(k.as_bytes(), m.as_bytes())))
+    }));
+    let mut m = HashMap::new();
+    m.insert("sha256".to_string(), sha256);
+    m.insert("hmacSha256".to_string(), hmac);
+    m.insert("hmacBase64Url".to_string(), hmac_b64u);
+    m.insert("randomHex".to_string(), random);
+    m.insert("base64Encode".to_string(), b64e);
+    m.insert("base64Decode".to_string(), b64d);
+    m.insert("base64UrlEncode".to_string(), b64ue);
+    m.insert("timingSafeEqual".to_string(), tse);
+    Value::object(m)
+}
+
+/// Minimal WHATWG-subset URL parser: `URL.parse(href, base?)` →
+/// `{protocol, host, hostname, port, path, query, hash, href}`.
+/// Relative refs resolve against `base` when given ( Merrick: `/p` + base ).
+fn make_url_ctor() -> Value {
+    let parse = Value::native(Arc::new(|args, vm| {
+        let href = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let base = args.get(1).map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        match parse_url(&href, if base.is_empty() { None } else { Some(&base) }) {
+            Some((proto, host, port, path, query, hash, full)) => {
+                let mut m = HashMap::new();
+                m.insert("protocol".to_string(), Value::string(proto));
+                let host_with_port = if port.is_empty() { host.clone() } else { format!("{}:{}", host, port) };
+                m.insert("host".to_string(), Value::string(host_with_port));
+                m.insert("hostname".to_string(), Value::string(host));
+                m.insert("port".to_string(), Value::string(port));
+                m.insert("path".to_string(), Value::string(path));
+                let mut qm = HashMap::new();
+                for (k, v) in query { qm.insert(k, Value::string(v)); }
+                m.insert("query".to_string(), Value::object(qm));
+                m.insert("hash".to_string(), Value::string(hash));
+                m.insert("href".to_string(), Value::string(full));
+                Value::object(m)
+            }
+            None => {
+                vm.throw_exception(Value::string("TypeError: invalid URL".to_string()));
+                Value::undefined()
+            }
+        }
+    }));
+    let mut m = HashMap::new();
+    m.insert("parse".to_string(), parse);
+    Value::object(m)
+}
+
+fn parse_url(href: &str, base: Option<&str>) -> Option<(String, String, String, String, Vec<(String, String)>, String, String)> {
+    let mut s = href.trim().to_string();
+    // hash
+    let hash = match s.clone().split_once('#') {
+        Some((a, h)) => { let hh = format!("#{}", h); s = a.to_string(); hh }
+        None => String::new(),
+    };
+    // resolve relative against base
+    if !s.contains("://") {
+        let b = base?;
+        let (bp, bh, bport, bpath, _, _, _) = parse_url(b, None)?;
+        if s.starts_with('/') {
+            s = format!("{}://{}{}", bp.trim_end_matches(':'), bh, s);
+            let _ = (bport, bpath);
+        } else if s.is_empty() {
+            s = b.to_string();
+        } else {
+            return None;
+        }
+    }
+    let (scheme, rest) = s.split_once("://")?;
+    if scheme.is_empty() || scheme.contains('/') { return None; }
+    let (auth, path_q) = match rest.split_once('/') {
+        Some((a, p)) => (a, format!("/{}", p)),
+        None => (rest, "/".to_string()),
+    };
+    let (host, port) = match auth.split_once(':') {
+        Some((h, p)) if !p.is_empty() => (h.to_string(), p.to_string()),
+        _ => (auth.to_string(), String::new()),
+    };
+    if host.is_empty() { return None; }
+    let (path, q) = match path_q.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (path_q.clone(), String::new()),
+    };
+    let mut query = Vec::new();
+    for part in q.split('&') {
+        if part.is_empty() { continue; }
+        match part.split_once('=') {
+            Some((k, v)) => query.push((url_decode(k), url_decode(v))),
+            None => query.push((url_decode(part), String::new())),
+        }
+    }
+    let full = format!("{}://{}{}{}", scheme, auth, path, if q.is_empty() { String::new() } else { format!("?{}", q) });
+    Some((format!("{}:", scheme), host, port, if path.is_empty() { "/".to_string() } else { path }, query, hash, full + ""))
+}
+
+/// Blocking single-shot HTTP/1.1 client (http:// only): `fetchSync(url, opts?)`.
+/// `opts` = `{method, headers, body, timeoutMs}`. Returns
+/// `{status, ok, headers, body}` or throws (`throw_exception`) on DNS/TCP/
+/// timeout/oversize/non-http errors. HTTPS throws with a loud pointer to TLS
+/// termination (reverse proxy) — no silent downgrade.
+/// Concurrency pattern: `await spawn(() => fetchSync(url))` (isolated worker).
+fn make_fetch_sync() -> Value {
+    Value::native(Arc::new(|args, vm| {
+        let url = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let (mut method, mut headers, mut body, mut timeout_ms) =
+            ("GET".to_string(), Vec::<(String, String)>::new(), Vec::<u8>::new(), 10_000u64);
+        if let Some(opts) = args.get(1).and_then(|v| v.as_object()) {
+            let o = opts.borrow();
+            if let Some(m) = o.get("method").and_then(|v| v.as_str()) { method = m.to_uppercase(); }
+            if let Some(h) = o.get("headers").and_then(|v| v.as_object()) {
+                let h = h.borrow();
+                for (k, v) in h.iter_sorted() {
+                    headers.push((k.to_string(), v.as_str().unwrap_or("").to_string()));
+                }
+            }
+            if let Some(b) = o.get("body") {
+                if let Some(s) = b.as_str() { body = s.as_bytes().to_vec(); }
+                else if !b.is_undefined() { body = serialize_value(b).into_bytes(); }
+            }
+            if let Some(t) = o.get("timeoutMs") {
+                timeout_ms = (t.to_number() as u64).clamp(100, 120_000);
+            }
+        }
+        match fetch_sync_inner(&url, &method, &headers, &body, timeout_ms) {
+            Ok((status, rheaders, rbody)) => {
+                let mut m = HashMap::new();
+                m.insert("status".to_string(), Value::number(status as f64));
+                m.insert("ok".to_string(), Value::bool((200..300).contains(&status)));
+                let mut hm = HashMap::new();
+                for (k, v) in rheaders { hm.insert(k.to_ascii_lowercase(), Value::string(v)); }
+                m.insert("headers".to_string(), Value::object(hm));
+                m.insert("body".to_string(), Value::string(String::from_utf8_lossy(&rbody).into_owned()));
+                Value::object(m)
+            }
+            Err(e) => {
+                vm.throw_exception(Value::string(format!("Error: fetchSync failed: {}", e)));
+                Value::undefined()
+            }
+        }
+    }))
+}
+
+fn fetch_sync_inner(url: &str, method: &str, headers: &[(String, String)], body: &[u8], timeout_ms: u64) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
+    if url.starts_with("https://") {
+        return Err("https:// is not supported by fetchSync — terminate TLS at a reverse proxy (Caddy/nginx) and call the http:// upstream, or pre-fetch outside the VM".to_string());
+    }
+    let rest = url.strip_prefix("http://").ok_or_else(|| "only http:// URLs are supported".to_string())?;
+    let (auth, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, format!("/{}", p)),
+        None => (rest, "/".to_string()),
+    };
+    if auth.is_empty() { return Err("invalid URL: empty host".to_string()); }
+    let (host, port) = match auth.split_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().map_err(|_| "invalid port".to_string())?),
+        None => (auth, 80),
+    };
+    if body.len() > 5 * 1024 * 1024 { return Err("request body exceeds 5MB".to_string()); }
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let addr = format!("{}:{}", host, port);
+    use std::net::ToSocketAddrs;
+    let sock = addr.to_socket_addrs().map_err(|e| format!("DNS failed for {}: {}", host, e))?
+        .next().ok_or_else(|| format!("DNS: no address for {}", host))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&sock, timeout)
+        .map_err(|e| format!("connect {} failed: {}", addr, e))?;
+    stream.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    stream.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    use std::io::{Read, Write};
+    let mut req = format!("{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n", method, path, auth, body.len());
+    for (k, v) in headers {
+        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) { continue; }
+        req.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    req.push_str("\r\n");
+    stream.write_all(req.as_bytes()).map_err(|e| format!("write failed: {}", e))?;
+    stream.write_all(body).map_err(|e| format!("write body failed: {}", e))?;
+    let mut buf = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > 6 * 1024 * 1024 { return Err("response exceeds 6MB".to_string()); }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                return Err("read timed out".to_string());
+            }
+            Err(e) => return Err(format!("read failed: {}", e)),
+        }
+    }
+    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| "invalid HTTP response".to_string())?;
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let mut lines = head.lines();
+    let status_line = lines.next().ok_or_else(|| "empty response".to_string())?;
+    let status: u16 = status_line.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| "bad status line".to_string())?;
+    let mut rheaders = Vec::new();
+    let mut content_len: Option<usize> = None;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let (k, v) = (k.trim().to_string(), v.trim().to_string());
+            if k.eq_ignore_ascii_case("content-length") { content_len = v.parse().ok(); }
+            rheaders.push((k, v));
+        }
+    }
+    let mut rbody = buf[head_end + 4..].to_vec();
+    // If Content-Length declares more than arrived (shouldn't with close-delimited
+    // reads, but guard anyway), truncate; if chunked, de-chunk minimally.
+    if rheaders.iter().any(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v.contains("chunked")) {
+        rbody = dechunk(&rbody)?;
+    } else if let Some(n) = content_len {
+        rbody.truncate(n);
+    }
+    Ok((status, rheaders, rbody))
+}
+
+fn dechunk(buf: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        let line_end = buf[i..].windows(2).position(|w| w == b"\r\n").ok_or_else(|| "bad chunk".to_string())? + i;
+        let size_str = std::str::from_utf8(&buf[i..line_end]).map_err(|_| "bad chunk size".to_string())?;
+        let size = usize::from_str_radix(size_str.trim(), 16).map_err(|_| "bad chunk size".to_string())?;
+        if size == 0 { break; }
+        if out.len() + size > 6 * 1024 * 1024 { return Err("response exceeds 6MB".to_string()); }
+        i = line_end + 2;
+        if i + size > buf.len() { return Err("truncated chunk".to_string()); }
+        out.extend_from_slice(&buf[i..i + size]);
+        i += size + 2;
+    }
+    Ok(out)
+}
+
 fn seed_global(name: &str, output: Option<Arc<Mutex<Vec<String>>>>, shared: Arc<SidecarMemory>) -> Value {
     match name {
+        "fetchSync" => make_fetch_sync(),
+        "crypto" => make_crypto_module(),
+        "URL" => make_url_ctor(),
+        "encodeURIComponent" => Value::native(Arc::new(|args, _vm| {
+            let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+            Value::string(encode_uri_component(&s))
+        })),
+        "decodeURIComponent" => Value::native(Arc::new(|args, vm| {
+            let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+            // Strict like V8: a bare `%` or bad hex is a URIError, not silent.
+            let mut ok = true;
+            let b = s.as_bytes();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'%' {
+                    if i + 2 >= b.len() || hex_val(b[i + 1]).is_none() || hex_val(b[i + 2]).is_none() {
+                        ok = false;
+                        break;
+                    }
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            if !ok {
+                vm.throw_exception(Value::string("URIError: malformed URI sequence".to_string()));
+                return Value::undefined();
+            }
+            Value::string(url_decode(&s))
+        })),
+        "encodeURI" => Value::native(Arc::new(|args, _vm| {
+            // encodeURI leaves `;/?:@&=+$,#` (valid URI punctuation) alone.
+            let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+            let mut out = String::with_capacity(s.len());
+            for b in s.as_bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+                    | b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+                    | b';' | b',' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b'#' => out.push(*b as char),
+                    _ => out.push_str(&format!("%{:02X}", b)),
+                }
+            }
+            Value::string(out)
+        })),
+        "decodeURI" => Value::native(Arc::new(|args, _vm| {
+            Value::string(url_decode(&args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default()))
+        })),
+        "btoa" => Value::native(Arc::new(|args, vm| {
+            let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+            if !s.is_ascii() {
+                vm.throw_exception(Value::string("Error: btoa input must be Latin-1".to_string()));
+                return Value::undefined();
+            }
+            Value::string(base64_encode(s.as_bytes()))
+        })),
+        "atob" => Value::native(Arc::new(|args, vm| {
+            let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+            match base64_decode(&s) {
+                Some(b) => Value::string(String::from_utf8_lossy(&b).into_owned()),
+                None => {
+                    vm.throw_exception(Value::string("Error: invalid base64".to_string()));
+                    Value::undefined()
+                }
+            }
+        })),
         "print" => make_print_fn(output),
         "http" => make_http_module(),
         "memory" => make_memory_module(shared),
@@ -12424,9 +12958,21 @@ fn make_fs_module() -> Value {
 }
 
 fn parse_http_request(text: &str) -> (String, String, String) {
+    let (m, u, b, _) = parse_http_request_full(text);
+    (m, u, b)
+}
+
+/// Full parse: method, url (with query), body string, headers (original case).
+fn parse_http_request_full(text: &str) -> (String, String, String, Vec<(String, String)>) {
     let mut method = "GET".to_string();
     let mut path = "/".to_string();
-    if let Some(first) = text.lines().next() {
+    let mut headers = Vec::new();
+    let (head, body) = match text.split_once("\r\n\r\n") {
+        Some((h, b)) => (h, b.to_string()),
+        None => (text, String::new()),
+    };
+    let mut lines = head.lines();
+    if let Some(first) = lines.next() {
         let mut parts = first.split_whitespace();
         if let Some(m) = parts.next() {
             method = m.to_string();
@@ -12435,11 +12981,15 @@ fn parse_http_request(text: &str) -> (String, String, String) {
             path = p.to_string();
         }
     }
-    let body = text
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_string())
-        .unwrap_or_default();
-    (method, path, body)
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim();
+            if !k.is_empty() {
+                headers.push((k.to_string(), v.trim().to_string()));
+            }
+        }
+    }
+    (method, path, body, headers)
 }
 
 fn json_escape(s: &str) -> String {
@@ -12504,8 +13054,8 @@ struct PendingRequest {
     buf: Vec<u8>,
     /// True once the handler was invoked (request fully read).
     started: bool,
-    /// `res.send` slot; Some once the handler runs.
-    body: Option<Arc<Mutex<Option<String>>>>,
+    /// Response slots; Some once the handler runs.
+    body: Option<ResSlots>,
     /// The handler's own promise when it suspended (None for sync handlers
     /// and while still reading).
     done: Option<Value>,
@@ -12535,28 +13085,184 @@ fn request_complete(buf: &[u8]) -> bool {
     text.len().saturating_sub(body_start) >= content_len
 }
 
-/// Parse a complete request, invoke the handler, and return the `res.send`
-/// slot plus the handler's promise (None for sync handlers).
+/// Percent-decode a URL component (`+` → space, `%XX` → byte). Malformed
+/// sequences pass through literally rather than failing the request.
+fn url_decode(s: &str) -> String {
+    let mut out = Vec::with_capacity(s.len());
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex_val(b[i + 1]), hex_val(b[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Split `/path?a=1&b=x` into path + decoded query pairs.
+fn split_path_query(url: &str) -> (String, Vec<(String, String)>) {
+    let (path, q) = match url.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (url, ""),
+    };
+    let mut pairs = Vec::new();
+    for part in q.split('&') {
+        if part.is_empty() { continue; }
+        match part.split_once('=') {
+            Some((k, v)) => pairs.push((url_decode(k), url_decode(v))),
+            None => pairs.push((url_decode(part), String::new())),
+        }
+    }
+    (path.to_string(), pairs)
+}
+
+/// Parse `Cookie: a=1; b=x` into pairs (names trimmed, values unquoted).
+fn parse_cookies(header: &str) -> Vec<(String, String)> {
+    header.split(';').filter_map(|p| {
+        let (k, v) = p.split_once('=')?;
+        let k = k.trim();
+        if k.is_empty() { return None; }
+        let v = v.trim().trim_matches('"');
+        Some((k.to_string(), url_decode(v)))
+    }).collect()
+}
+
+fn reason_for(status: u16) -> &'static str {
+    match status {
+        200 => "OK", 201 => "Created", 204 => "No Content",
+        301 => "Moved Permanently", 302 => "Found", 304 => "Not Modified",
+        400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+        404 => "Not Found", 405 => "Method Not Allowed", 409 => "Conflict",
+        422 => "Unprocessable Entity", 429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        _ => "OK",
+    }
+}
+
+/// Response slots shared with the `res` natives below.
+#[derive(Clone, Default)]
+struct ResSlots {
+    body: Arc<Mutex<Option<Vec<u8>>>>,
+    status: Arc<Mutex<u16>>,
+    headers: Arc<Mutex<Vec<(String, String)>>>,
+    content_type: Arc<Mutex<Option<String>>>,
+}
+
+/// Parse a complete request, invoke the handler, and return the response slots
+/// plus the handler's promise (None for sync handlers).
 fn start_handler(
     vm: &mut dyn VmHost,
     handler: &Value,
     req_text: &str,
-) -> (Arc<Mutex<Option<String>>>, Option<Value>) {
-    let (method, path, body) = parse_http_request(req_text);
-    let res_body: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let send_body = res_body.clone();
+) -> (ResSlots, Option<Value>) {
+    let (method, url, body, headers) = parse_http_request_full(req_text);
+    let slots = ResSlots::default();
+    // res.send(obj|string): JSON for objects (legacy), raw bytes for strings.
+    let s_send = slots.clone();
     let send = Value::native(Arc::new(move |args, _vm| {
-        let mut slot = send_body.lock().unwrap();
-        *slot = args.first().map(serialize_value);
+        let mut slot = s_send.body.lock().unwrap();
+        *slot = args.first().map(|v| {
+            if let Some(s) = v.as_str() { s.as_bytes().to_vec() } else { serialize_value(v).into_bytes() }
+        });
+        Value::undefined()
+    }));
+    // res.json(obj): explicit JSON.
+    let s_json = slots.clone();
+    let json = Value::native(Arc::new(move |args, _vm| {
+        let mut slot = s_json.body.lock().unwrap();
+        *slot = args.first().map(|v| serialize_value(v).into_bytes());
+        let mut ct = s_json.content_type.lock().unwrap();
+        if ct.is_none() { *ct = Some("application/json".to_string()); }
+        Value::undefined()
+    }));
+    // res.text(s) / res.html(s): string bodies with content type.
+    let s_text = slots.clone();
+    let text = Value::native(Arc::new(move |args, _vm| {
+        let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        *s_text.body.lock().unwrap() = Some(s.into_bytes());
+        let mut ct = s_text.content_type.lock().unwrap();
+        if ct.is_none() { *ct = Some("text/plain; charset=utf-8".to_string()); }
+        Value::undefined()
+    }));
+    let s_html = slots.clone();
+    let html = Value::native(Arc::new(move |args, _vm| {
+        let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        *s_html.body.lock().unwrap() = Some(s.into_bytes());
+        *s_html.content_type.lock().unwrap() = Some("text/html; charset=utf-8".to_string());
+        Value::undefined()
+    }));
+    // res.status(code): override the status (default 200).
+    let s_status = slots.clone();
+    let status = Value::native(Arc::new(move |args, _vm| {
+        let code = args.first().map(|v| v.to_number() as u16).unwrap_or(200).clamp(100, 599);
+        *s_status.status.lock().unwrap() = code;
+        Value::undefined()
+    }));
+    // res.set(name, value): extra response header. `Content-Type` replaces
+    // the content-type slot (so `res.set("Content-Type", ...)` + `res.text`
+    // never emits duplicate Content-Type headers).
+    let s_set = slots.clone();
+    let set = Value::native(Arc::new(move |args, _vm| {
+        let name = args.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let val = args.get(1).map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        if name.is_empty() { return Value::undefined(); }
+        if name.eq_ignore_ascii_case("content-type") {
+            *s_set.content_type.lock().unwrap() = Some(val);
+        } else {
+            s_set.headers.lock().unwrap().push((name, val));
+        }
         Value::undefined()
     }));
     let mut res = HashMap::new();
     res.insert("send".to_string(), send);
+    res.insert("json".to_string(), json);
+    res.insert("text".to_string(), text);
+    res.insert("html".to_string(), html);
+    res.insert("status".to_string(), status);
+    res.insert("set".to_string(), set);
     let mut req = HashMap::new();
     req.insert("method".to_string(), Value::string(method));
-    req.insert("url".to_string(), Value::string(path));
+    req.insert("url".to_string(), Value::string(url.clone()));
     req.insert("body".to_string(), Value::string(body));
-    req.insert("headers".to_string(), Value::object(HashMap::new()));
+    let (path_only, query) = split_path_query(&url);
+    req.insert("path".to_string(), Value::string(path_only));
+    let mut qmap = HashMap::new();
+    for (k, v) in &query { qmap.insert(k.clone(), Value::string(v.clone())); }
+    req.insert("query".to_string(), Value::object(qmap));
+    let mut hmap = HashMap::new();
+    let mut cookie_hdr = String::new();
+    for (k, v) in &headers {
+        hmap.insert(k.to_ascii_lowercase(), Value::string(v.clone()));
+        if k.eq_ignore_ascii_case("cookie") { cookie_hdr = v.clone(); }
+    }
+    req.insert("headers".to_string(), Value::object(hmap));
+    let mut cmap = HashMap::new();
+    for (k, v) in parse_cookies(&cookie_hdr) { cmap.insert(k, Value::string(v)); }
+    req.insert("cookies".to_string(), Value::object(cmap));
+    // Trust proxy headers when present (TLS-terminating reverse proxy pattern).
+    if let Some((_, proto)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-proto")) {
+        req.insert("protocol".to_string(), Value::string(proto.clone()));
+    } else {
+        req.insert("protocol".to_string(), Value::string("http".to_string()));
+    }
+    if let Some((_, ip)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-for")) {
+        let first = ip.split(',').next().unwrap_or("").trim().to_string();
+        req.insert("ip".to_string(), Value::string(first));
+    }
     let result = vm.call_value(handler, &[Value::object(req), Value::object(res)]);
     if let Some(err) = vm.take_uncaught_exception() {
         // A synchronous throw inside the handler: surface it as a rejected
@@ -12569,20 +13275,29 @@ fn start_handler(
             continuations: Vec::new(),
             owner: wake,
         })));
-        return (res_body, Some(done));
+        return (slots, Some(done));
     }
     let done = result.as_promise().map(|_| result.clone());
-    (res_body, done)
+    (slots, done)
 }
 
 fn write_response(stream: &mut std::net::TcpStream, status: &str, body: &str) {
-    let resp = format!(
-        "{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status,
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(resp.as_bytes());
+    write_response_full(stream, 200, None, &[], body.as_bytes());
+    let _ = status;
+}
+
+fn write_response_full(stream: &mut std::net::TcpStream, status: u16, content_type: Option<&str>, extra: &[(String, String)], body: &[u8]) {
+    let reason = reason_for(status);
+    let ct = content_type.unwrap_or("application/json");
+    let mut head = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n", status, reason, ct, body.len());
+    for (k, v) in extra {
+        // CRLF injection guard: header names/values must be single-line.
+        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) { continue; }
+        head.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
 }
 
 /// Bind the HTTP listener (non-blocking accepts) and return it plus the
@@ -12733,17 +13448,21 @@ fn serve_loop(
             if let Some(reason) = outcome {
                 let mut pr = pending.remove(i);
                 completed = true;
-                let body = pr.body.as_ref().and_then(|b| b.lock().unwrap().clone());
+                let slots = pr.body.as_ref().cloned().unwrap_or_default();
                 match reason {
                     // The handler (or its awaited python call) failed: 500
                     // with the rejection reason as JSON.
                     Some(err_val) => {
                         let body = format!("{{\"error\": {}}}", serialize_value(&err_val));
-                        write_response(&mut pr.stream, "HTTP/1.1 500 Internal Server Error", &body);
+                        write_response_full(&mut pr.stream, 500, Some("application/json"), &[], body.as_bytes());
                     }
                     None => {
-                        let body = body.unwrap_or_else(|| "ok".to_string());
-                        write_response(&mut pr.stream, "HTTP/1.1 200 OK", &body);
+                        let body = slots.body.lock().unwrap().clone().unwrap_or_else(|| b"ok".to_vec());
+                        let status = *slots.status.lock().unwrap();
+                        let status = if status == 0 { 200 } else { status };
+                        let ct = slots.content_type.lock().unwrap().clone();
+                        let extra = slots.headers.lock().unwrap().clone();
+                        write_response_full(&mut pr.stream, status, ct.as_deref(), &extra, &body);
                     }
                 }
                 // Dropping the request closes the connection (EOF for the
@@ -13771,10 +14490,12 @@ mod tests {
         // Request 1: a=1, b=2 -> "102". Request 2 (cache hit): a=3, b=4 ->
         // "304" — the module's counter state lives in the module's globals,
         // not the request, so it must carry across requests.
+        // Note: `res.send(string)` delivers strings RAW (Express-style), not
+        // JSON-quoted — `res.json` is the explicit JSON path.
         let r1 = http_client(port, "/").expect("request 1");
         let r2 = http_client(port, "/").expect("request 2");
-        assert_eq!(body(&r1), "\"102\"", "got: {}", r1);
-        assert_eq!(body(&r2), "\"304\"", "got: {}", r2);
+        assert_eq!(body(&r1), "102", "got: {}", r1);
+        assert_eq!(body(&r2), "304", "got: {}", r2);
         // Stop the serve thread and join: the VM drops deterministically
         // (python children reaped, shared-segment file removed) instead of
         // lingering on a detached thread.
@@ -16294,6 +17015,186 @@ mod tests {
         drop(stalled);
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         server.join().expect("serve thread exited");
+    }
+
+    // -- web primitives (crypto / codec / URL / fetchSync / HTTP fields) --
+
+    fn web_out(src: &str) -> String {
+        let (_, sink) = run_src(src);
+        let v = sink.lock().unwrap().join("\n");
+        v
+    }
+
+    #[test]
+    fn web_crypto_vectors() {
+        // NIST + RFC 4231 case 2 + round-trips.
+        assert_eq!(web_out(r#"print(crypto.sha256("abc"))"#),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(web_out(r#"print(crypto.sha256(""))"#),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(web_out(r#"print(crypto.hmacSha256("Jefe", "what do ya want for nothing?"))"#),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assert_eq!(web_out(r#"print(crypto.base64Encode("Man"))"#), "TWFu");
+        assert_eq!(web_out(r#"print(crypto.base64Decode("TWFu"))"#), "Man");
+        assert_eq!(web_out(r#"print(crypto.base64UrlEncode(">>>"))"#), "Pj4-");
+        assert_eq!(web_out(r#"print(crypto.timingSafeEqual("abc", "abc"))"#), "true");
+        assert_eq!(web_out(r#"print(crypto.timingSafeEqual("abc", "abd"))"#), "false");
+        assert_eq!(web_out(r#"print(crypto.timingSafeEqual("abc", "abcd"))"#), "false");
+        // randomHex: 16 bytes -> 32 hex chars, and two calls differ.
+        assert_eq!(web_out(r#"print(crypto.randomHex(16).length)"#), "32");
+        let a = web_out(r#"print(crypto.randomHex(16))"#);
+        let b = web_out(r#"print(crypto.randomHex(16))"#);
+        assert_ne!(a, b);
+        // JWT-shape signature is deterministic and verifies.
+        assert_eq!(
+            web_out(r#"const s = crypto.hmacBase64Url("k", "a.b"); print(s === crypto.hmacBase64Url("k", "a.b"))"#),
+            "true");
+    }
+
+    #[test]
+    fn web_uri_codec() {
+        assert_eq!(web_out(r#"print(encodeURIComponent("a b+c"))"#), "a%20b%2Bc");
+        assert_eq!(web_out(r#"print(encodeURIComponent("~ok-_.!*'()"))"#), "~ok-_.!*'()");
+        assert_eq!(web_out(r#"print(decodeURIComponent("a%20b"))"#), "a b");
+        assert_eq!(web_out(r#"print(encodeURI("http://x/?a=b&c=d#f"))"#), "http://x/?a=b&c=d#f");
+        assert_eq!(web_out(r#"print(btoa("Man"))"#), "TWFu");
+        assert_eq!(web_out(r#"print(atob("TWFu"))"#), "Man");
+        // Malformed % sequence is a loud URIError, not silent garbage.
+        let (mut vm, _) = run_src(r#"try { decodeURIComponent("%zz"); print("no-throw"); } catch (e) { print("threw"); }"#);
+        assert!(vm.take_error().is_none());
+        let (_, sink) = run_src(r#"try { decodeURIComponent("%zz"); print("no-throw"); } catch (e) { print("threw"); }"#);
+        assert_eq!(sink.lock().unwrap().join("\n"), "threw");
+    }
+
+    #[test]
+    fn web_url_parse() {
+        assert_eq!(
+            web_out(r#"const u = URL.parse("https://ex.com:8080/p?q=1#h"); print(u.protocol, u.hostname, u.port, u.path, u.hash)"#),
+            "https: ex.com 8080 /p #h");
+        assert_eq!(
+            web_out(r#"const u = URL.parse("https://ex.com:8080/p?q=1#h"); print(u.host)"#),
+            "ex.com:8080");
+        assert_eq!(
+            web_out(r#"const u = URL.parse("http://h/a?x=1&y=two+words"); print(u.query.x, u.query.y)"#),
+            "1 two words");
+        assert_eq!(
+            web_out(r#"const u = URL.parse("/rel", "http://base.com/root"); print(u.hostname, u.path)"#),
+            "base.com /rel");
+        assert_eq!(
+            web_out(r#"try { URL.parse(":::"); print("no-throw"); } catch (e) { print("threw"); }"#),
+            "threw");
+    }
+
+    /// Raw TCP client that can send arbitrary headers/cookies (the shared
+    /// `http_client` only does bare GETs).
+    fn http_raw(port: u16, req: &str) -> std::io::Result<String> {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        stream.write_all(req.as_bytes())?;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(String::from_utf8_lossy(&buf).to_string())
+    }
+
+    fn serve_once(src: &str) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+        let program = Compiler::compile_source_with_mode(src, true, false).expect("compile");
+        let (mut vm, _sink) = Vm::with_output(program);
+        vm.run();
+        let (listener, port) = bind_server(0).expect("bind ephemeral port");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let server = std::thread::spawn(move || {
+            let handler = vm.globals.iter().zip(vm.global_names.iter())
+                .find(|(_, n)| n.as_str() == "handle").map(|(v, _)| v.clone()).expect("handle global");
+            serve_loop(&mut vm, &handler, listener, &stop2);
+        });
+        (port, stop, server)
+    }
+
+    #[test]
+    fn web_server_fields_and_response_controls() {
+        let (port, stop, server) = serve_once(r#"
+            async function handle(req, res) {
+                if (req.path === "/st") {
+                    res.status(201);
+                    res.set("X-Test", "yes");
+                    res.json({ q: req.query, c: req.cookies, h: req.headers["x-foo"], p: req.path });
+                    return;
+                }
+                if (req.path === "/html") { res.html("<h1>hi</h1>"); return; }
+                res.text("plain");
+            }
+        "#);
+        let r = http_raw(port, "GET /st?a=1&b=x+y HTTP/1.1\r\nHost: t\r\nX-Foo: bar\r\nCookie: t=abc; u=2\r\n\r\n").expect("req");
+        assert!(r.contains("201 Created"), "status: {}", r);
+        assert!(r.contains("X-Test: yes"), "header: {}", r);
+        assert!(r.contains("\"a\": \"1\""), "query: {}", r);
+        assert!(r.contains("\"b\": \"x y\""), "query-decode: {}", r);
+        assert!(r.contains("\"t\": \"abc\""), "cookies: {}", r);
+        assert!(r.contains("\"h\": \"bar\""), "headers: {}", r);
+        let h = http_raw(port, "GET /html HTTP/1.1\r\nHost: t\r\n\r\n").expect("html");
+        assert!(h.contains("text/html"), "ct: {}", h);
+        assert!(h.contains("<h1>hi</h1>"), "body: {}", h);
+        // Traversal + 404 shape are covered by the demo's static lib; the
+        // router contract (unknown path -> handler default) is exercised here.
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("serve thread exited");
+    }
+
+    #[test]
+    fn web_fetch_sync_roundtrip_and_https_refusal() {
+        // Tiny origin server on a thread (std only, no alloy involved).
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let origin = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().take(2) {
+                let mut s = stream.unwrap();
+                // Read the FULL request (headers + Content-Length body) before
+                // responding: a single read canSplit headers/body across
+                // segments, and closing early RSTs the client's pending write.
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match s.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if request_complete(&buf) { break; }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let body = r#"{"hello":"world"}"#;
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes());
+            }
+        });
+        let out = web_out(&format!(r#"
+            const r = fetchSync("http://127.0.0.1:{}/x");
+            print(r.status, r.ok, r.body);
+        "#, port));
+        assert_eq!(out, "200 true {\"hello\":\"world\"}");
+        // POST with JSON body echoes through httpbin-style: use the same origin.
+        let out = web_out(&format!(r#"
+            try {{
+                const r = fetchSync("http://127.0.0.1:{}/x", {{ method: "POST", headers: {{ "X-A": "b" }}, body: "hi" }});
+                print(r.status, r.ok);
+            }} catch (e) {{ print("THREW:" + e); }}
+        "#, port));
+        assert_eq!(out, "200 true");
+        // https refuses loudly (no silent downgrade).
+        let out = web_out(r#"try { fetchSync("https://example.com/"); print("no-throw"); } catch (e) { print("threw"); }"#);
+        assert_eq!(out, "threw");
+        origin.join().expect("origin exited");
     }
 
 }

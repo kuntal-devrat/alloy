@@ -75,7 +75,22 @@ http.createServer(async (req, res) => {
 
 The runtime seeds a small set of global natives for operators, in addition to the
 standard library (`print`, `http`, `memory`, `fs`, `Promise`, `setTimeout`,
-`channel`, `spawn`, `require`, `reload`, `Date`, `Math`, `JSON`, `Number`, …).
+`channel`, `spawn`, `require`, `reload`, `Date`, `Math`, `JSON`, `Number`,
+`fetchSync`, `crypto`, `URL`, `encodeURIComponent`, `btoa`, …).
+
+### 5.2. Web Surface (API-shaped apps)
+
+`http.createServer(handler).listen(port)` serves JSON APIs and static frontends
+(`examples/web-todos` is the reference app: router + HS256 JWT + JSON-file DB).
+Handlers receive `req = { method, url, path, query, headers, cookies, body,
+protocol, ip }` (`X-Forwarded-Proto/For` trusted for TLS-terminating proxies)
+and answer with `res.{send, json, text, html, status(code), set(k, v)}`
+(`send(string)` is raw, Express-style; `json` is the explicit JSON path).
+Outgoing calls use `fetchSync(url, { method, headers, body, timeoutMs })`
+(http:// only — https refuses loudly; run concurrent fetches inside `spawn`
+workers). `crypto` ships dependency-free SHA-256/HMAC-SHA256/base64(randomHex,
+timingSafeEqual) so JWT auth needs no packages. Plain HTTP only — terminate
+TLS at Caddy/nginx (`examples/web-todos/Caddyfile`).
 
 **`sweepSegments()` — reclaim shared-memory segments leaked by crashed runs.**
 

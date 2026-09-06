@@ -1,0 +1,40 @@
+// Sliding-window rate limiter for alloy web apps. No deps.
+// Usage: const rl = createLimiter({ windowMs: 60000, max: 100 });
+//        r.use((req, res) => rl.check(req, res));  // returns false to stop
+export function createLimiter(opts) {
+  const windowMs = opts.windowMs || 60000;
+  const max = opts.max || 100;
+  const hits = {};
+  return {
+    check: function (req, res) {
+      const ip = req.ip || req.headers["x-forwarded-for"] || "local";
+      const now = Date.now();
+      let arr = hits[ip];
+      if (!arr) { arr = []; hits[ip] = arr; }
+      const fresh = [];
+      for (let i = 0; i < arr.length; i++) {
+        if (now - arr[i] < windowMs) { fresh.push(arr[i]); }
+      }
+      hits[ip] = fresh;
+      if (fresh.length >= max) {
+        res.status(429);
+        res.json({ error: "too many requests" });
+        return false;
+      }
+      fresh.push(now);
+      return true;
+    }
+  };
+}
+
+export function cors(req, res) {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") {
+    res.status(204);
+    res.text("");
+    return false;
+  }
+  return true;
+}

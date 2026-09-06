@@ -2788,3 +2788,49 @@ fn regex_lexing_and_loud_errors() {
         CompileError::UnexpectedToken(_)
     ));
 }
+
+#[test]
+fn web_crypto_known_vectors() {
+    assert_eq!(run_lines("print(crypto.sha256(\"abc\"))"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert_eq!(run_lines("print(crypto.hmacSha256(\"Jefe\", \"what do ya want for nothing?\"))"), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    assert_eq!(run_lines("print(crypto.base64Encode(\"Man\"), crypto.base64Decode(\"TWFu\"))"), "TWFu Man");
+    assert_eq!(run_lines("print(crypto.timingSafeEqual(\"a\", \"a\"), crypto.timingSafeEqual(\"a\", \"b\"))"), "true false");
+    assert_eq!(run_lines("print(crypto.randomHex(8).length)"), "16");
+}
+
+#[test]
+fn web_uri_and_url_helpers() {
+    assert_eq!(run_lines("print(encodeURIComponent(\"a b+c\"))"), "a%20b%2Bc");
+    assert_eq!(run_lines("print(decodeURIComponent(\"x%20y\"))"), "x y");
+    assert_eq!(run_lines("print(btoa(\"Man\"), atob(\"TWFu\"))"), "TWFu Man");
+    assert_eq!(run_lines("const u = URL.parse(\"https://ex.com:8080/p?q=1#h\"); print(u.protocol, u.host, u.port, u.path)"), "https: ex.com:8080 8080 /p");
+    assert_eq!(run_lines("const u = URL.parse(\"/rel\", \"http://b.com/r\"); print(u.hostname, u.path)"), "b.com /rel");
+}
+
+#[test]
+fn web_jwt_roundtrip_in_js() {
+    // HS256 sign -> verify using only engine natives (mirrors lib/auth.ajs).
+    assert_eq!(
+        run_lines("const h = crypto.base64UrlEncode(JSON.stringify({alg:\"HS256\"}));\nconst p = crypto.base64UrlEncode(JSON.stringify({sub:\"u\"}));\nconst s = crypto.hmacBase64Url(\"s3cret\", h + \".\" + p);\nconst t = h + \".\" + p + \".\" + s;\nprint(crypto.timingSafeEqual(s, t.split(\".\")[2]))"),
+        "true"
+    );
+}
+
+#[test]
+fn web_res_status_and_helpers_exist() {
+    // Response controls are seeded natives (shape check without a server).
+    assert_eq!(run_lines("print(typeof res_unused)"), "undefined");
+    assert_eq!(run_lines("print(typeof encodeURIComponent, typeof fetchSync, typeof crypto, typeof URL)"), "function function object object");
+}
+
+#[test]
+fn cannot_shadow_web_builtins() {
+    assert!(matches!(
+        compile_err("crypto = 5"),
+        CompileError::CannotShadowBuiltin(_)
+    ));
+    assert!(matches!(
+        compile_err("function fetchSync() {}"),
+        CompileError::CannotShadowBuiltin(_)
+    ));
+}

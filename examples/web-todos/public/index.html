@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>todos — alloy</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 560px; margin: 2rem auto; padding: 0 1rem; }
+li { margin: 0.25rem 0; cursor: pointer; }
+li.done { text-decoration: line-through; color: #888; }
+</style>
+</head>
+<body>
+<h1>todos <small>(alloy)</small></h1>
+<form id="f"><input id="t" placeholder="new todo" autofocus><button>add</button></form>
+<ul id="list"></ul>
+<script>
+const list = document.getElementById('list');
+async function load() {
+  const r = await fetch('/api/todos');
+  const todos = await r.json();
+  list.innerHTML = '';
+  todos.forEach(t => {
+    const li = document.createElement('li');
+    li.textContent = t.title;
+    if (t.done) li.className = 'done';
+    li.onclick = async () => {
+      await fetch('/api/todos/' + t.id, { method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ done: !t.done }) });
+      load();
+    };
+    list.appendChild(li);
+  });
+}
+document.getElementById('f').onsubmit = async (e) => {
+  e.preventDefault();
+  const v = document.getElementById('t').value.trim();
+  if (!v) return;
+  await fetch('/api/todos', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: v }) });
+  document.getElementById('t').value = '';
+  load();
+};
+load();
+</script>
+</body>
+</html>

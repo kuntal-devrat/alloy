@@ -1,0 +1,45 @@
+// Static file serving for alloy web apps. No deps.
+// Traversal-guarded: `root` is prepended and any `..` segment rejects with 403.
+import * as fs from 'alloy:fs';
+
+const TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json",
+  ".txt": "text/plain; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon"
+};
+
+function contentType(path) {
+  const dot = path.lastIndexOf(".");
+  const ext = dot >= 0 ? path.slice(dot) : "";
+  return TYPES[ext] || "application/octet-stream";
+}
+
+export function serveFile(res, root, urlPath) {
+  let rel = urlPath.split("?")[0];
+  if (rel === "/") { rel = "/index.html"; }
+  const segs = rel.split("/");
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i] === "..") {
+      res.status(403);
+      res.text("forbidden");
+      return true;
+    }
+  }
+  const full = root + rel;
+  if (!fs.existsSync(full)) { return false; }
+  const body = fs.readFileSync(full);
+  if (body.slice(0, 15) === "alloy fs error:") {
+    res.status(404);
+    res.json({ error: "not found" });
+    return true;
+  }
+  res.set("Content-Type", contentType(full));
+  res.set("Cache-Control", "public, max-age=60");
+  res.text(body);
+  return true;
+}

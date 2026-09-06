@@ -1,0 +1,40 @@
+// HS256 JWT + cookie helpers for alloy web apps. No deps.
+// Token shape: base64url(header).base64url(payload).base64url(sig)
+// where sig = base64url(HMAC-SHA256(secret, "<h>.<p>")) via the native
+// crypto.hmacBase64Url (raw bytes stay in Rust — no lossy string round-trip).
+
+function b64urlJson(obj) {
+  return crypto.base64UrlEncode(JSON.stringify(obj));
+}
+
+export function sign(payload, secret) {
+  const h = b64urlJson({ alg: "HS256", typ: "JWT" });
+  const p = b64urlJson(payload);
+  const sig = crypto.hmacBase64Url(secret, h + "." + p);
+  return h + "." + p + "." + sig;
+}
+
+export function verify(token, secret) {
+  const parts = token.split(".");
+  if (parts.length !== 3) { return null; }
+  const expect = crypto.hmacBase64Url(secret, parts[0] + "." + parts[1]);
+  if (!crypto.timingSafeEqual(expect, parts[2])) { return null; }
+  try {
+    const payload = JSON.parse(crypto.base64Decode(parts[1]));
+    if (payload.exp && Date.now() > payload.exp) { return null; }
+    return payload;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Bearer from `Authorization: Bearer <t>` or `token` cookie.
+export function bearerToken(req) {
+  const auth = req.headers["authorization"] || "";
+  if (auth.slice(0, 7) === "Bearer ") { return auth.slice(7); }
+  return req.cookies["token"] || null;
+}
+
+export function setTokenCookie(res, token) {
+  res.set("Set-Cookie", "token=" + token + "; HttpOnly; Path=/; SameSite=Lax");
+}

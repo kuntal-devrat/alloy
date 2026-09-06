@@ -1,0 +1,8 @@
+# TLS termination for alloy web apps: alloy speaks plain HTTP on 127.0.0.1,
+# Caddy/nginx owns certificates + HTTPS. alloy trusts X-Forwarded-* headers
+# (req.protocol / req.ip) set here — see server.ajs.
+#
+#   caddy run --config Caddyfile --adapter caddyfile
+todos.example.com {
+    reverse_proxy 127.0.0.1:8090
+}

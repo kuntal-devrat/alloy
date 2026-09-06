@@ -1,0 +1,115 @@
+// web-todos — a complete JSON API + static frontend on alloy. No deps.
+//
+//   GET  /                    -> public/index.html (static)
+//   GET  /api/todos           -> [{id, title, done}]
+//   POST /api/todos           {"title"} -> 201 {todo} (auth)
+//   PUT  /api/todos/:id       {"done"}  -> {todo} (auth)
+//   POST /api/login           {"user"}  -> {token} (demo login, any name)
+//   GET  /health              -> {ok}
+//
+// Persistence: ./data.json via alloy:fs. Auth: HS256 JWT (lib/auth.ajs).
+// Run:  ALLOY_VM_BUDGET=0 ./target/release/alloy examples/web-todos/server.ajs
+// Behind TLS: terminate at Caddy/nginx (see Caddyfile), trust X-Forwarded-*.
+import { http } from 'alloy:core';
+import * as fs from 'alloy:fs';
+import { createRouter } from './lib/router.ajs';
+import { sign, verify, bearerToken, setTokenCookie } from './lib/auth.ajs';
+import { serveFile } from './lib/static.ajs';
+import { createLimiter, cors } from './lib/ratelimit.ajs';
+
+const SECRET = "demo-secret-change-me";
+const DB = "./examples/web-todos/data.json";
+const PUBLIC = "./examples/web-todos/public";
+
+function loadDb() {
+  if (!fs.existsSync(DB)) { return { todos: [], next: 1 }; }
+  try {
+    return JSON.parse(fs.readFileSync(DB));
+  } catch (e) {
+    return { todos: [], next: 1 };
+  }
+}
+
+function saveDb(db) {
+  fs.writeFileSync(DB, JSON.stringify(db));
+}
+
+const r = createRouter();
+const limiter = createLimiter({ windowMs: 60000, max: 300 });
+
+r.use(cors);
+r.use(function (req, res) { return limiter.check(req, res); });
+
+function needAuth(req, res) {
+  const t = bearerToken(req);
+  const payload = t ? verify(t, SECRET) : null;
+  if (!payload) {
+    res.status(401);
+    res.json({ error: "unauthorized" });
+    return null;
+  }
+  return payload;
+}
+
+r.post("/api/login", (req, res) => {
+  let body = {};
+  try { body = JSON.parse(req.body || "{}"); } catch (e) { body = {}; }
+  const user = body.user || "anon";
+  const token = sign({ sub: user, exp: Date.now() + 3600000 }, SECRET);
+  setTokenCookie(res, token);
+  res.json({ token: token });
+});
+
+r.get("/api/todos", (req, res) => {
+  const db = loadDb();
+  res.json(db.todos);
+});
+
+r.post("/api/todos", (req, res) => {
+  if (!needAuth(req, res)) { return; }
+  let body = {};
+  try { body = JSON.parse(req.body || "{}"); } catch (e) { body = {}; }
+  if (!body.title || body.title.length > 280) {
+    res.status(422);
+    res.json({ error: "title required (max 280 chars)" });
+    return;
+  }
+  const db = loadDb();
+  const todo = { id: db.next, title: body.title, done: false };
+  db.next = db.next + 1;
+  db.todos.push(todo);
+  saveDb(db);
+  res.status(201);
+  res.json(todo);
+});
+
+r.put("/api/todos/:id", (req, res, params) => {
+  if (!needAuth(req, res)) { return; }
+  const db = loadDb();
+  let found = null;
+  for (let i = 0; i < db.todos.length; i++) {
+    if (db.todos[i].id === parseInt(params.id)) { found = db.todos[i]; }
+  }
+  if (!found) {
+    res.status(404);
+    res.json({ error: "not found" });
+    return;
+  }
+  let body = {};
+  try { body = JSON.parse(req.body || "{}"); } catch (e) { body = {}; }
+  if (body.done !== undefined) { found.done = !!body.done; }
+  if (body.title !== undefined && body.title.length <= 280) { found.title = body.title; }
+  saveDb(db);
+  res.json(found);
+});
+
+r.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+http.createServer((req, res) => {
+  if (req.method === "GET" && (req.path === "/" || req.path.slice(0, 8) !== "/api/")) {
+    if (serveFile(res, PUBLIC, req.path)) { return; }
+  }
+  r.handle(req, res);
+}).listen(8090);

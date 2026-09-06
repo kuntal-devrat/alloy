@@ -1,0 +1,57 @@
+// Minimal router for alloy web apps: method + `:param` path matching.
+// No deps. Usage:
+//   import { createRouter } from './lib/router.ajs';
+//   const r = createRouter();
+//   r.get('/api/todos/:id', (req, res, params) => { ... });
+//   http.createServer((req, res) => r.handle(req, res)).listen(8080);
+//
+// Note: methods return `this` (never a closed-over self name) so chained
+// calls work on the engine's method-call `this` binding.
+
+function matchRoute(route, method, path) {
+  if (route.method !== method && route.method !== "ALL") { return null; }
+  const q = path.split("?");
+  const segs = q[0].split("/");
+  const rsegs = [];
+  const psegs = [];
+  for (let i = 0; i < route.parts.length; i++) { if (route.parts[i] !== "") { rsegs.push(route.parts[i]); } }
+  for (let i = 0; i < segs.length; i++) { if (segs[i] !== "") { psegs.push(segs[i]); } }
+  if (rsegs.length !== psegs.length) { return null; }
+  const params = {};
+  for (let i = 0; i < rsegs.length; i++) {
+    if (rsegs[i][0] === ":") {
+      params[rsegs[i].slice(1)] = decodeURIComponent(psegs[i]);
+    } else if (rsegs[i] !== psegs[i]) {
+      return null;
+    }
+  }
+  return params;
+}
+
+export function createRouter() {
+  const routes = [];
+  const middlewares = [];
+  return {
+    use: function (fn) { middlewares.push(fn); return this; },
+    get: function (p, fn) { routes.push({ method: "GET", pattern: p, parts: p.split("/"), fn: fn }); return this; },
+    post: function (p, fn) { routes.push({ method: "POST", pattern: p, parts: p.split("/"), fn: fn }); return this; },
+    put: function (p, fn) { routes.push({ method: "PUT", pattern: p, parts: p.split("/"), fn: fn }); return this; },
+    del: function (p, fn) { routes.push({ method: "DELETE", pattern: p, parts: p.split("/"), fn: fn }); return this; },
+    handle: function (req, res) {
+      for (let i = 0; i < middlewares.length; i++) {
+        const stop = middlewares[i](req, res);
+        if (stop === false) { return; }
+      }
+      const path = req.path || req.url;
+      for (let i = 0; i < routes.length; i++) {
+        const params = matchRoute(routes[i], req.method, path);
+        if (params !== null) {
+          routes[i].fn(req, res, params);
+          return;
+        }
+      }
+      res.status(404);
+      res.json({ error: "not found" });
+    }
+  };
+}
