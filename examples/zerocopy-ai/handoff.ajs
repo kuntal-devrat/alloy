@@ -1,0 +1,14 @@
+// Pure bridge microbench: 20 back-to-back classify calls, one shared buffer.
+// No HTTP, no JSON.parse — just the JS->Python call cost.
+import { memory } from 'alloy:core';
+import { classify } from './model.py' as python;
+
+const pixels = [];
+for (let i = 0; i < 1024; i++) { pixels.push(((i % 200) - 100) / 100); }
+const buf = memory.allocateFloat32Array(pixels);
+
+(async () => {
+  const t0 = Date.now();
+  for (let i = 0; i < 20; i++) { await python.classify(buf.ptr, buf.length); }
+  print(Date.now() - t0);
+})();

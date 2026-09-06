@@ -1,0 +1,26 @@
+// zerocopy-ai — JS API + Python AI in ONE file, zero-copy shared memory.
+//
+// POST /classify  {"pixels": [f32, ...]}  ->  {"label": "bright 0.9123"}
+// GET  /health    -> {"ok": true}
+//
+// The pixels are written ONCE into the shared segment; Python reads the exact
+// same bytes via its segment mapping (no JSON, no socket, no copy).
+// Compare with server.node.js: same API, same math, but every request spawns
+// python and serializes the whole vector as JSON.
+import { http, memory } from 'alloy:core';
+import { classify } from './model.py' as python;
+
+http.createServer(async (req, res) => {
+  if (req.method === "GET") {
+    res.send({ ok: true });
+    return;
+  }
+  if (req.method === "POST") {
+    const input = JSON.parse(req.body);
+    const buf = memory.allocateFloat32Array(input.pixels);
+    const label = await python.classify(buf.ptr, buf.length);
+    res.send({ label: label });
+    return;
+  }
+  res.send({ ok: true });
+}).listen(8081);
