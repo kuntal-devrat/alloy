@@ -1,0 +1,78 @@
+// express-demo — the Express API you know, running on alloy.
+//
+//   import { express } from '../../lib/express.ajs';
+//
+// Tours: middleware order, :params, Router mount, error middleware,
+// JSON bodies, cookies, static files. Run:
+//   ALLOY_VM_BUDGET=0 ./target/debug/alloy examples/express-demo/server.ajs
+import { express, Router, json, cors, statik } from '../../lib/express.ajs';
+
+const app = express();
+
+app.use(cors());
+app.use(json());
+
+// Logger middleware (Express style).
+app.use((req, res, next) => {
+  print(req.method + " " + req.url);
+  next();
+});
+
+const api = Router();
+
+let posts = [
+  { id: 1, title: "hello alloy" },
+  { id: 2, title: "middleware works" }
+];
+
+api.get('/posts', (req, res) => {
+  res.json(posts);
+});
+
+api.get('/posts/:id', (req, res) => {
+  let found = null;
+  for (let i = 0; i < posts.length; i++) {
+    if (posts[i].id === parseInt(req.params.id)) { found = posts[i]; }
+  }
+  if (!found) { res.status(404); res.json({ error: "not found" }); return; }
+  res.json(found);
+});
+
+// Two handlers, first calls next() — Express chaining.
+function needTitle(req, res, next) {
+  if (!req.body || !req.body.title) {
+    res.status(422);
+    res.json({ error: "title required" });
+    return;
+  }
+  next();
+}
+
+api.post('/posts', needTitle, (req, res) => {
+  const p = { id: posts.length + 1, title: req.body.title };
+  posts.push(p);
+  res.status(201);
+  res.cookie("last_post", "" + p.id, { maxAge: 3600 });
+  res.json(p);
+});
+
+api.get('/boom', (req, res) => {
+  throw new Error("kaboom");
+});
+
+app.use('/api', api);
+
+app.get('/hello/:name', (req, res) => {
+  res.send("hello " + req.params.name);
+});
+
+// Error middleware runs LAST (4 args -> detected via fn.length).
+// eslint-disable-next-line
+app.use((err, req, res, next) => {
+  res.status(500);
+  res.json({ error: "caught: " + err });
+});
+
+app.use(statik("./examples/express-demo/public"));
+
+app.listen(8091);

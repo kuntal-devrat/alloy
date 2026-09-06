@@ -1,0 +1,45 @@
+// Smoke test for the express-compat framework — dogfoods fetchSync.
+// Run: start server.ajs in one shell, then
+//   ALLOY_VM_BUDGET=0 ./target/debug/alloy examples/express-demo/smoke.ajs
+// Exits non-zero (uncaught) on the first failed assertion.
+
+function check(name, cond) {
+  if (!cond) { throw new Error("FAIL: " + name); }
+  print("ok: " + name);
+}
+
+const B = "http://127.0.0.1:8091";
+
+let r = fetchSync(B + "/api/posts");
+check("list 200", r.status === 200);
+check("list json", r.body.indexOf("hello alloy") >= 0);
+
+r = fetchSync(B + "/api/posts/2");
+check("param route", r.body.indexOf("middleware works") >= 0);
+
+r = fetchSync(B + "/api/posts/99");
+check("param 404", r.status === 404);
+
+r = fetchSync(B + "/api/posts", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+check("validation 422", r.status === 422);
+
+r = fetchSync(B + "/api/posts", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{\"title\":\"third\"}" });
+check("create 201", r.status === 201);
+check("create cookie", (r.headers["set-cookie"] || "").indexOf("last_post=3") >= 0);
+
+r = fetchSync(B + "/hello/ada");
+check("send + param", r.status === 200 && r.body === "hello ada");
+
+r = fetchSync(B + "/api/boom");
+check("error middleware 500", r.status === 500 && r.body.indexOf("kaboom") >= 0);
+
+r = fetchSync(B + "/nope");
+check("framework 404", r.status === 404);
+
+r = fetchSync(B + "/");
+check("static html", r.status === 200 && r.body.indexOf("served by alloy") >= 0);
+
+r = fetchSync(B + "/api/posts", { method: "OPTIONS" });
+check("cors preflight", r.status === 204);
+
+print("all smoke tests passed");

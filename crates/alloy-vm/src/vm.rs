@@ -1219,6 +1219,10 @@ struct Handler {
     handler_pc: usize,
     /// Index of the frame that owns this handler (call_stack position).
     frame_depth: usize,
+    /// Program the handler bytecode belongs to: a throw from another module
+    /// must resume in THIS program (like Return restores return_program),
+    /// or the pc lands in the wrong bytecode and the dispatch dies silently.
+    program: u32,
 }
 
 /// Result of routing a thrown value through the unwinder.
@@ -2806,6 +2810,12 @@ impl Vm {
                 self.cells_stack.truncate(f.cells_len);
                 self.handlers.truncate(f.handlers_len);
             }
+            // Cross-module throw: resume in the handler's program, mirroring
+            // Return's return_program restore (without this the handler pc
+            // executes against the throw site's bytecode and dies silently).
+            if h.program != self.program_id {
+                self.load_program(h.program);
+            }
             // Keep the handler frame's locals (they were written before the
             // throw and the catch body may read them); drop operand garbage.
             let floor = match self.call_stack.last() {
@@ -2842,6 +2852,11 @@ impl Vm {
             self.stack.truncate(f.base_slot);
             self.cells_stack.truncate(f.cells_len);
             self.handlers.truncate(f.handlers_len);
+        }
+        // Same cross-module restore for the async-boundary jump: return_addr
+        // lives in the caller's program.
+        if b.return_program != self.program_id {
+            self.load_program(b.return_program);
         }
         self.stack.truncate(b.base_slot);
         self.push(promise);
@@ -4916,6 +4931,7 @@ impl Vm {
                         stack_depth: self.stack.len(),
                         handler_pc,
                         frame_depth: self.call_stack.len(),
+                        program: self.program_id,
                     });
                     pc += 5;
                 }
@@ -6375,11 +6391,16 @@ impl Vm {
             }
             // Class/static properties on the function itself: `prototype`,
             // static methods. Ordinary functions have no props -> undefined.
-            f.props
-                .borrow()
-                .as_ref()
-                .and_then(|p| p.borrow().get(s).cloned())
-                .unwrap_or(Value::undefined())
+            // `fn.length` (declared fixed-param count, like V8) falls back
+            // here when no static prop shadows it — arity sniffing for
+            // Express-style 4-arg error middleware depends on it.
+            if let Some(v) = f.props.borrow().as_ref().and_then(|p| p.borrow().get(s).cloned()) {
+                return v;
+            }
+            if s == "length" {
+                return Value::int(f.params as i64);
+            }
+            Value::undefined()
         } else if let (Some(props), Some(s)) = (obj.as_native_props(), prop.as_str()) {
             // Native statics (`String.fromCharCode`) and the constructor's
             // `prototype` property.
@@ -17023,6 +17044,104 @@ mod tests {
         let (_, sink) = run_src(src);
         let v = sink.lock().unwrap().join("\n");
         v
+    }
+
+    /// The express-compat framework (`lib/express.ajs`) against a live server:
+    /// routing, :params, middleware order, error middleware, JSON bodies.
+    /// Guards framework/runtime compat in CI (the full 12-check tour lives in
+    /// `examples/express-demo/smoke.ajs`).
+    #[test]
+    fn express_framework_live_routes() {
+        let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../lib/express.ajs");
+        if !lib.exists() {
+            eprintln!("skip: lib/express.ajs not found");
+            return;
+        }
+        let program = Compiler::compile_source_with_mode(
+            r#"
+            import { express, Router, json } from './express.ajs';
+            const app = express();
+            app.use(json());
+            const api = Router();
+            api.get('/items/:id', (req, res) => { res.json({ id: req.params.id }); });
+            api.post('/items', (req, res) => {
+                if (!req.body || !req.body.name) { res.status(422); res.json({ error: "name required" }); return; }
+                res.status(201); res.json({ made: req.body.name });
+            });
+            api.get('/fail', (req, res) => { throw new Error("nope"); });
+            app.use('/api', api);
+            app.use((err, req, res, next) => { res.status(500); res.json({ error: "caught: " + err }); });
+            async function handle(req, res) { app.handle(req, res); }
+            "#,
+            true,
+            false,
+        )
+        .unwrap();
+        let (mut vm, _sink) = Vm::with_output(program);
+        vm.set_script_path(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../lib/main.ajs")
+                .to_string_lossy(),
+        );
+        vm.run();
+        let (listener, port) = bind_server(0).expect("bind ephemeral port");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let server = std::thread::spawn(move || {
+            let handler = vm.globals.iter().zip(vm.global_names.iter())
+                .find(|(_, n)| n.as_str() == "handle").map(|(v, _)| v.clone()).expect("handle global");
+            serve_loop(&mut vm, &handler, listener, &stop2);
+        });
+        let get = |p: &str| http_raw(port, &format!("GET {} HTTP/1.1\r\nHost: t\r\n\r\n", p)).expect("req");
+        let post = |p: &str, b: &str| http_raw(port, &format!("POST {} HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", p, b.len(), b)).expect("req");
+        let r = get("/api/items/7");
+        assert!(r.contains("200 OK") && r.contains("\"id\": \"7\""), "param: {}", r);
+        let r = post("/api/items", r#"{"name":"x"}"#);
+        assert!(r.contains("201 Created") && r.contains("made"), "create: {}", r);
+        let r = post("/api/items", "{}");
+        assert!(r.contains("422"), "validation: {}", r);
+        let r = get("/api/fail");
+        assert!(r.contains("500") && r.contains("nope"), "error-mw: {}", r);
+        let r = get("/nothing-here");
+        assert!(r.contains("404"), "framework-404: {}", r);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("serve thread exited");
+    }
+
+    /// Cross-module throw: a try/catch in one module must catch a throw from
+    /// a function defined in another module (the unwinder resumes in the
+    /// HANDLER's program — without the restore the pc lands in the throw
+    /// site's bytecode and the dispatch dies silently with exit 0).
+    #[test]
+    fn cross_module_throw_caught_in_other_module() {
+        let dir = std::env::temp_dir().join(format!("alloy_xmod_throw_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("catcher.ajs"),
+            "export function callIt(fns) {\n\
+             \x20 try {\n\
+             \x20\x20 fns[0]({}, {}, () => \"step\");\n\
+             \x20\x20 print(\"returned\");\n\
+             \x20 } catch (e) { print(\"caught\", e); }\n\
+             }\n",
+        )
+        .unwrap();
+        let program = Compiler::compile_source_with_mode(
+            "import { callIt } from './catcher.ajs';\n\
+             const fns = [(req, res, step) => { throw new Error('xmod'); }];\n\
+             callIt(fns);\n\
+             print('after');\n",
+            true,
+            false,
+        )
+        .unwrap();
+        let (mut vm, sink) = Vm::with_output(program);
+        vm.set_script_path(&dir.join("main.ajs").to_string_lossy());
+        vm.run();
+        assert!(vm.take_error().is_none());
+        assert_eq!(sink.lock().unwrap().join("\n"), "caught Error: xmod\nafter");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
