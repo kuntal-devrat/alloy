@@ -106,3 +106,30 @@ Honest reading: V8 JIT is 2–36x faster on sustained compute. Closest gaps are
 Reproduce: `cargo build --release`, then `python bench_all.py` (wall) and
 `ALLOY_VM_BUDGET=0 python bench_timed2.py` (compute). Scripts removed after run;
 logic mirrors `difftest/bench.sh` / `bench_timed.sh`.
+
+## 5. Optimization pass (post-report, same machine, `ALLOY_VM_BUDGET=0`)
+
+Shipped in this commit — all 631 tests still green:
+
+- **Dispatch**: unchecked byte fetch + cached `ALLOY_OP_HIST` flag (no
+  OnceLock/mutex per instr) `vm.rs:3394`; back-edge trip counter + `ALLOY_JIT_LOG=1`
+  hot-loop reporter (baseline-JIT hypervisor stub) `vm.rs:4471`.
+- **Poly IC**: `ic` is now 2-way (`IcPoly` primary+secondary) for Get/SetProperty
+  `vm.rs:312` — 2-shape loops stop thrashing; 3+ shapes stay megamorphic (slow path).
+- **Shapes**: thread-local transition cache `(parent,name,off)->shape` (1024 entries)
+  `value.rs` — creating N same-shape objects clones the map once, not N times.
+- **Calls**: per-site `call_ic` + leaf fast path (skip `cells_stack` push when
+  `cells.is_empty()`) `vm.rs:6012` — fib/ack/collatz inner calls avoid Vec traffic.
+- **ALU**: `ArithChain` limit 24→48 steps `compiler.rs:3191` (longer int chains fuse).
+- **Numbers**: manual `fast_itoa` for 0..1M `value.rs` (JSON bench stringifies
+  0..50000 in a loop); packed-int `Array.join` without Value boxing `vm.rs:8420`.
+
+Spot-check (single-run wall, same box — noisy, direction only):
+`props` ~229ms (was 238), `int_loop` ~148ms (was 223), `json` ~137ms (was 277),
+`queens` ~74ms (was 109), `strings` still beats node. Full 24-suite re-run not
+repeated here; expect 5–30% compute improvement, no correctness change.
+
+Still open (months): polymorphic call IC with hidden-class guards, Map/Set inline
+probes, int-only `sort` comparator path, loop-counter register opcode, Cranelift
+baseline JIT behind the back-edge counter. The counter + `ALLOY_JIT_LOG` is the
+hook: `ALLOY_JIT_LOG=1 alloy bench/cmp_chain.ajs` prints hot `pc` + trips.

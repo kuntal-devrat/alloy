@@ -3188,7 +3188,7 @@ impl Compiler {
             return false;
         };
         let has_local = steps.iter().any(|s| s.hdr & 0xE0 == ChainStep::LOAD);
-        if ops < 2 || !has_local || steps.len() > 24 {
+        if ops < 2 || !has_local || steps.len() > 48 {
             return false;
         }
         self.emit_chain(&steps, term);
@@ -3211,7 +3211,7 @@ impl Compiler {
         }
         let mut steps = Vec::new();
         if op == "=" {
-            if self.build_chain(value, &mut steps).is_none() || steps.len() > 24 {
+            if self.build_chain(value, &mut steps).is_none() || steps.len() > 48 {
                 return false;
             }
         } else {
@@ -3235,7 +3235,7 @@ impl Compiler {
                     steps.push(ChainStep { hdr: ChainStep::COMBINE | (ar + 1), op: 0 });
                 }
             }
-            if steps.len() > 24 {
+            if steps.len() > 48 {
                 return false;
             }
         }

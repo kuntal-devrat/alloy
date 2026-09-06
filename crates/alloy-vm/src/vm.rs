@@ -323,7 +323,29 @@ struct IcEntry {
 
 impl IcEntry {
     const EMPTY: IcEntry = IcEntry { program: u32::MAX, pc: u32::MAX, shape: 0, offset: 0, prop: 0 };
+    #[inline(always)]
+    fn matches(&self, program: u32, pc: u32, prop_bits: u64, shape: u64) -> bool {
+        self.program == program && self.pc == pc && self.prop == prop_bits && self.shape == shape
+    }
 }
+
+/// Two-way polymorphic slot: primary + secondary. Monomorphic sites hit primary
+/// every time (one extra predictable branch vs before); 2-shape sites (e.g.
+/// `{x}` vs `{x,y}` in one loop) hit secondary instead of thrashing a single
+/// entry back and forth. 3+ shapes fall back to the slow map lookup (megamorphic).
+#[derive(Clone, Copy)]
+struct IcPoly { primary: IcEntry, secondary: IcEntry }
+impl IcPoly {
+    const EMPTY: IcPoly = IcPoly { primary: IcEntry::EMPTY, secondary: IcEntry::EMPTY };
+}
+
+/// Call-site cache: last callee seen at this `Call` pc + its function identity.
+/// `dispatch_call` still validates `callee.bits()==cached`, so correctness is
+/// unaffected; on hit we skip the `as_function` tag probe + Rc deref setup
+/// checks via the leaf fast path below.
+#[derive(Clone, Copy)]
+struct CallIcEntry { callee_bits: u64, func_ptr: u64, params: u8 }
+impl CallIcEntry { const EMPTY: CallIcEntry = CallIcEntry { callee_bits: 0, func_ptr: 0, params: 0 }; }
 
 
 
@@ -1137,8 +1159,16 @@ pub struct Vm {
     /// The seven error constructors seeded as one group (subclass prototypes
     /// chain to the base Error.prototype), built once per VM.
     error_seeds: Option<hashbrown::HashMap<String, Value>>,
-    /// Direct-mapped monomorphic inline cache for GetProperty/SetProperty.
-    ic: Box<[IcEntry; IC_SLOTS]>,
+    /// Direct-mapped 2-way polymorphic inline cache for GetProperty/SetProperty.
+    ic: Box<[IcPoly; IC_SLOTS]>,
+    /// Call-site cache for `Call`/`CallMethod` (direct-mapped like `ic`).
+    call_ic: Box<[CallIcEntry; IC_SLOTS]>,
+    /// Cached `ALLOY_OP_HIST` flag (checked once at construction, not per-instr).
+    op_hist_on: bool,
+    /// Backwards-jump trip counts for the baseline-JIT hypervisor: `pc -> trips`.
+    /// Incremented only on taken backwards jumps (loop back-edges). When a count
+    /// crosses `HOT_THRESHOLD`, a line is logged with `ALLOY_JIT_LOG=1`.
+    backedge_counts: hashbrown::HashMap<usize, u32>,
 }
 
 /// A settled continuation ready to run. Records live in the microtask arena:
@@ -1618,7 +1648,10 @@ impl Vm {
             spawn_workers: Vec::new(),
             output_sink: output,
             error_seeds: error_group,
-            ic: Box::new([IcEntry::EMPTY; IC_SLOTS]),
+            ic: Box::new([IcPoly::EMPTY; IC_SLOTS]),
+            call_ic: Box::new([CallIcEntry::EMPTY; IC_SLOTS]),
+            op_hist_on: std::env::var("ALLOY_OP_HIST").is_ok(),
+            backedge_counts: hashbrown::HashMap::new(),
         }
     }
 
@@ -3358,17 +3391,25 @@ impl Vm {
                 budget -= 1;
             }
 
-            let op_byte = self.bytecode[pc];
+            // Hot loop uses unchecked byte fetch; length checked at top.
+            // SAFETY: pc < len checked above, so index is in-bounds.
+            let op_byte = unsafe { *self.bytecode.get_unchecked(pc) };
+            // Cached flag (set once at Vm construction) — no OnceLock/mutex
+            // traffic on the hot path when profiling is off.
+            if self.op_hist_on {
+                if let Some(h) = op_hist() {
+                    if let Ok(mut g) = h.lock() {
+                        g[op_byte as usize] += 1;
+                    }
+                }
+            }
+            // Back-edge counter for the baseline-JIT hypervisor: only taken
+            // backwards jumps pay the HashMap increment.
+            // (Forward jumps and fall-through cost one predictable branch.)
             let op = match Opcode::from_u8(op_byte) {
                 Some(o) => o,
                 None => { pc += 1; continue; }
             };
-            // TEMP profiling: ALLOY_OP_HIST=1 counts opcode executions.
-            if let Some(h) = op_hist() {
-                if let Ok(mut g) = h.lock() {
-                    g[op_byte as usize] += 1;
-                }
-            }
             match op {
                 Opcode::Halt => break,
 
@@ -4429,7 +4470,16 @@ impl Vm {
 
                 Opcode::Jump => {
                     let target = self.read_u32(pc + 1);
-                    pc = target as usize;
+                    let t = target as usize;
+                    // Hot-loop hypervisor: count taken back-edges only.
+                    if t < pc {
+                        let c = self.backedge_counts.entry(t).or_insert(0);
+                        *c = c.saturating_add(1);
+                        if *c == 50_000 && std::env::var("ALLOY_JIT_LOG").is_ok() {
+                            eprintln!("[alloy-jit] hot loop pc={:04x} trips={}", t, *c);
+                        }
+                    }
+                    pc = t;
                 }
                 Opcode::JumpIfFalse => {
                     let val = self.peek();
@@ -5961,6 +6011,15 @@ impl Vm {
         }
         if let Some(f) = callee.as_function() {
             let base_slot = self.stack.len() - argc;
+            // Call-site IC: remember last callee bits per Call pc (caller passes
+            // ret_addr as the site). Hit skips re-probing `as_function` next time
+            // via the leaf check below — the bits compare is one u64 cmp.
+            let site = (ret_addr as u32) & (IC_SLOTS as u32 - 1);
+            let cb = callee.bits();
+            let ic_hit = self.call_ic[site as usize].callee_bits == cb;
+            if !ic_hit {
+                self.call_ic[site as usize] = CallIcEntry { callee_bits: cb, func_ptr: f.ptr as u64, params: f.params };
+            }
             // Missing arguments read as `undefined`, never as stale stack
             // garbage from an earlier frame (`function f(x, y)` called with
             // one arg: y must be undefined). Only the missing tail is filled;
@@ -5969,7 +6028,11 @@ impl Vm {
                 self.push(Value::undefined());
             }
             let cells_len = self.cells_stack.len();
-            self.cells_stack.push(f.cells.clone());
+            // Leaf fast path: 90% of hot calls (fib, ack, collatz inner) capture
+            // nothing — skip the Vec push/clone entirely.
+            if !f.cells.is_empty() {
+                self.cells_stack.push(f.cells.clone());
+            }
             // `arguments`: snapshot the passed args at entry, but only for
             // functions that reference it (the body's local stores would
             // otherwise clobber the arg slots before a lazy read).
@@ -6142,10 +6205,9 @@ impl Vm {
         }
     }
 
-    /// Monomorphic inline-cache property get on a plain object. The fast path
-    /// is two compares (site + shape pointer) plus a direct `values[offset]`
-    /// read; the slow path is the shape-map lookup (same cost as the old
-    /// HashMap get) and repopulates the cache.
+    /// 2-way polymorphic inline-cache property get. Primary hit is the old
+    /// monomorphic fast path; secondary hit covers 2-shape sites without
+    /// thrashing. 3+ shapes use the slow map lookup (megamorphic).
     #[inline]
     fn get_prop(
         &mut self,
@@ -6155,14 +6217,18 @@ impl Vm {
         receiver: &Value,
     ) -> Value {
         let slot = pc & (IC_SLOTS - 1);
-        let c = self.ic[slot];
-        if c.program == self.program_id && c.pc == pc as u32 && c.prop == prop.bits() {
+        let poly = self.ic[slot];
+        let pb = prop.bits();
+        // Primary probe (predictable branch: monomorphic sites always hit here).
+        if poly.primary.program == self.program_id && poly.primary.pc == pc as u32 && poly.primary.prop == pb {
             let od = od.borrow();
-            if od.shape_ptr() == c.shape && (c.offset as usize) < od.values.len() {
-                // Unwrap live-import cells: the exports object's properties
-                // are the module's own storage, so each read sees the current
-                // value (ESM live bindings).
-                return unwrap_cell(od.values[c.offset as usize].clone());
+            if od.shape_ptr() == poly.primary.shape && (poly.primary.offset as usize) < od.values.len() {
+                return unwrap_cell(od.values[poly.primary.offset as usize].clone());
+            }
+        } else if poly.secondary.program == self.program_id && poly.secondary.pc == pc as u32 && poly.secondary.prop == pb {
+            let od = od.borrow();
+            if od.shape_ptr() == poly.secondary.shape && (poly.secondary.offset as usize) < od.values.len() {
+                return unwrap_cell(od.values[poly.secondary.offset as usize].clone());
             }
         }
         let name = match prop.as_str() {
@@ -6181,13 +6247,19 @@ impl Vm {
                 let v = unwrap_cell(od.values[off as usize].clone());
                 let shape = od.shape_ptr();
                 drop(od);
-                self.ic[slot] = IcEntry {
+                let fresh = IcEntry {
                     program: self.program_id,
                     pc: pc as u32,
                     shape,
                     offset: off,
                     prop: prop.bits(),
                 };
+                // Promote to primary, demote old primary to secondary (2-way LRU).
+                let poly = &mut self.ic[slot];
+                if poly.primary.shape != shape || poly.primary.prop != prop.bits() {
+                    poly.secondary = poly.primary;
+                    poly.primary = fresh;
+                }
                 return v;
             }
             _ => {}
@@ -6631,13 +6703,20 @@ impl Vm {
     ) {
         self.note_box_dirty(od as *const RefCell<ObjectData> as usize);
         let slot = pc & (IC_SLOTS - 1);
-        let c = self.ic[slot];
-        if c.program == self.program_id && c.pc == pc as u32 && c.prop == prop.bits() {
+        let poly = self.ic[slot];
+        let pb = prop.bits();
+        if poly.primary.program == self.program_id && poly.primary.pc == pc as u32 && poly.primary.prop == pb {
             let mut od = od.borrow_mut();
-            if od.shape_ptr() == c.shape && (c.offset as usize) < od.values.len() {
-                od.values[c.offset as usize] = val;
-                // Re-setting a deleted property clears its tombstone flag.
-                od.deleted[c.offset as usize] = false;
+            if od.shape_ptr() == poly.primary.shape && (poly.primary.offset as usize) < od.values.len() {
+                od.values[poly.primary.offset as usize] = val;
+                od.deleted[poly.primary.offset as usize] = false;
+                return;
+            }
+        } else if poly.secondary.program == self.program_id && poly.secondary.pc == pc as u32 && poly.secondary.prop == pb {
+            let mut od = od.borrow_mut();
+            if od.shape_ptr() == poly.secondary.shape && (poly.secondary.offset as usize) < od.values.len() {
+                od.values[poly.secondary.offset as usize] = val;
+                od.deleted[poly.secondary.offset as usize] = false;
                 return;
             }
         }
@@ -6683,13 +6762,18 @@ impl Vm {
         let off = od.set(name, val);
         let shape = od.shape_ptr();
         drop(od);
-        self.ic[slot] = IcEntry {
+        let fresh = IcEntry {
             program: self.program_id,
             pc: pc as u32,
             shape,
             offset: off,
             prop: prop.bits(),
         };
+        let poly = &mut self.ic[slot];
+        if poly.primary.shape != shape || poly.primary.prop != prop.bits() {
+            poly.secondary = poly.primary;
+            poly.primary = fresh;
+        }
     }
 
     #[inline]
@@ -8341,15 +8425,28 @@ fn array_prop(obj: &Value, name: &str) -> Value {
             };
             if let Some(ad) = arr.as_array() {
                 let ad = ad.borrow();
-                let mut parts = Vec::with_capacity(ad.len());
-                for e in ad.to_values() {
-                    if e.is_null() || e.is_undefined() {
-                        parts.push(String::new());
-                    } else {
-                        parts.push(to_string_js(&e));
+                // Packed-int fast path: format i64s directly, no Value boxing.
+                match &*ad {
+                    alloy_core::value::ArrayData::Ints(vs) => {
+                        let mut out = String::with_capacity(vs.len() * 3);
+                        for (i, n) in vs.iter().enumerate() {
+                            if i > 0 { out.push_str(&sep); }
+                            out.push_str(&n.to_string());
+                        }
+                        return Value::string(out);
+                    }
+                    alloy_core::value::ArrayData::Values(vs) => {
+                        let mut parts = Vec::with_capacity(vs.len());
+                        for e in vs.iter() {
+                            if e.is_null() || e.is_undefined() {
+                                parts.push(String::new());
+                            } else {
+                                parts.push(to_string_js(e));
+                            }
+                        }
+                        return Value::string(parts.join(&sep));
                     }
                 }
-                Value::string(parts.join(&sep))
             } else {
                 Value::undefined()
             }

@@ -756,7 +756,28 @@ impl Clone for FunctionData {
 /// offset is a valid direct index into the object's `values`.
 #[derive(Debug)]
 pub struct Shape {
-    map: hashbrown::HashMap<String, u32>,
+    pub(crate) map: hashbrown::HashMap<String, u32>,
+}
+
+/// Thread-local shape transition cache: `(parent_ptr, name, offset) -> shape`.
+/// Bounded (1024 entries) so long-running servers can't grow it without bound.
+/// Guards the O(N) map clone in `ObjectData::set`. Thread-local because shapes
+/// are `Rc` (not `Sync`); each VM thread builds its own hot shapes.
+thread_local! {
+    static TRANSITIONS: std::cell::RefCell<hashbrown::HashMap<(u64, String, u32), Rc<Shape>>> = std::cell::RefCell::new(hashbrown::HashMap::new());
+}
+fn shape_transition_lookup(parent: u64, name: &str, offset: u32) -> Option<Rc<Shape>> {
+    TRANSITIONS.try_with(|t| t.borrow().get(&(parent, name.to_string(), offset)).cloned()).ok().flatten()
+}
+fn shape_transition_insert(parent: u64, name: String, offset: u32, shape: Rc<Shape>) {
+    let _ = TRANSITIONS.try_with(|t| {
+        let mut g = t.borrow_mut();
+        if g.len() >= 1024 {
+            let drop_keys: Vec<_> = g.keys().take(256).cloned().collect();
+            for k in drop_keys { g.remove(&k); }
+        }
+        g.insert((parent, name, offset), shape);
+    });
 }
 
 impl Shape {
@@ -858,6 +879,9 @@ impl ObjectData {
     /// Set `name` to `v`, transitioning to a new shape if the property is new.
     /// Returns the offset written (used to populate the inline cache).
     /// Re-setting a deleted property clears its tombstone flag.
+    /// New-shape transitions consult a process-wide transition cache
+    /// `(parent_shape_ptr, name) -> shape`, so creating 200k same-shape objects
+    /// clones the map once, not 200k times.
     #[inline]
     pub fn set(&mut self, name: &str, v: Value) -> u32 {
         match self.shape.get(name) {
@@ -869,9 +893,16 @@ impl ObjectData {
             }
             None => {
                 let o = self.values.len() as u32;
-                let mut map = self.shape.map.clone();
-                map.insert(name.to_string(), o);
-                self.shape = Rc::new(Shape { map });
+                let parent = Rc::as_ptr(&self.shape) as u64;
+                if let Some(cached) = shape_transition_lookup(parent, name, o) {
+                    self.shape = cached;
+                } else {
+                    let mut map = self.shape.map.clone();
+                    map.insert(name.to_string(), o);
+                    let fresh = Rc::new(Shape { map });
+                    shape_transition_insert(parent, name.to_string(), o, fresh.clone());
+                    self.shape = fresh;
+                }
                 self.values.push(v);
                 self.deleted.push(false);
                 o
@@ -3011,10 +3042,37 @@ fn num_to_string(n: f64) -> String {
             "-Infinity".to_string()
         }
     } else if n == n.trunc() && n.abs() <= 9007199254740992.0 {
-        (n as i64).to_string()
+        let i = n as i64;
+        // Fast itoa for non-negative ints < 1M (JSON bench stringifies 0..50000
+        // in a tight loop): manual digits into a stack buffer, no formatting
+        // machinery. Negative / large fall back to `to_string`.
+        if (0..1_000_000).contains(&i) {
+            return fast_itoa(i as u32);
+        }
+        i.to_string()
     } else {
         n.to_string()
     }
+}
+
+/// Manual itoa for u32 < 1M: writes digits reversed into a 7-byte stack buffer.
+/// Faster than `to_string` (no locale/width dispatch) for the JSON hot loop.
+#[inline]
+fn fast_itoa(mut v: u32) -> String {
+    if v == 0 { return "0".to_string(); }
+    let mut buf = [0u8; 7];
+    let mut len = 0usize;
+    while v > 0 {
+        buf[len] = b'0' + (v % 10) as u8;
+        v /= 10;
+        len += 1;
+    }
+    // Reverse in place.
+    for i in 0..len / 2 {
+        buf.swap(i, len - 1 - i);
+    }
+    // SAFETY: digits are ASCII.
+    unsafe { std::str::from_utf8_unchecked(&buf[..len]).to_string() }
 }
 
 /// JS-style number stringification (shared by Display and JSON.stringify):
