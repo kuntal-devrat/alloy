@@ -1577,7 +1577,7 @@ impl Vm {
             epoch: Instant::now(),
             handlers: Vec::new(),
             uncaught_exception: None,
-        instruction_budget: std::env::var("ALLOY_VM_BUDGET").ok().and_then(|s| s.parse().ok()).or(Some(50_000_000)),
+        instruction_budget: match std::env::var("ALLOY_VM_BUDGET").ok().and_then(|s| s.parse::<u64>().ok()) { Some(0) => None, Some(n) => Some(n), None => Some(50_000_000) },
         budget_exhausted: false,
             native_throw_jump: None,
             // The receiver of the in-flight native call (method natives read
