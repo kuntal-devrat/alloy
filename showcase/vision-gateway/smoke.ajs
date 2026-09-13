@@ -1,0 +1,45 @@
+// Automated Smoke Test for Alloy Vision Gateway
+// Run with: alloy run showcase/vision-gateway/smoke.ajs
+
+print("=== Running Alloy Vision Gateway Smoke Test ===");
+
+const BASE = "http://127.0.0.1:8092";
+
+function assert(name, condition) {
+    if (!condition) {
+        throw new Error(`FAIL: ${name}`);
+    }
+    print(`  [PASS] ${name}`);
+}
+
+// 1. Health check
+print("1. Testing /health...");
+const rHealth = fetchSync(`${BASE}/health`);
+assert("Health check returns 200", rHealth.status === 200);
+assert("Health payload indicates online status", rHealth.body.indexOf("online") >= 0);
+
+// 2. Object Detection
+print("2. Testing POST /api/detect with zero-copy shared memory...");
+const testPayload = JSON.stringify({
+    width: 64,
+    height: 64,
+    threshold: 0.25
+});
+
+const rDetect = fetchSync(`${BASE}/api/detect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: testPayload
+});
+
+assert("Detection returns 200", rDetect.status === 200);
+assert("Response contains detections array", rDetect.body.indexOf("detections") >= 0);
+assert("Response contains zero-copy metrics", rDetect.body.indexOf("zero_copy_handoff_overhead_ms") >= 0);
+
+// 3. Zero-Copy Benchmark
+print("3. Testing GET /api/benchmark...");
+const rBench = fetchSync(`${BASE}/api/benchmark`);
+assert("Benchmark returns 200", rBench.status === 200);
+assert("Benchmark reports FPS throughput", rBench.body.indexOf("realized_throughput_fps") >= 0);
+
+print("\nAll Vision Gateway smoke tests passed successfully! Zero-copy vision bridge is operational.\n");
