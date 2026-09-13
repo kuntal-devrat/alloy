@@ -58,7 +58,7 @@ pub(crate) const MAJOR_THRESHOLD_INIT: usize = 1 << 20;
 pub(crate) const MAJOR_THRESHOLD_MIN: usize = 1 << 16;
 pub(crate) const MAJOR_THRESHOLD_MAX: usize = 1 << 24;
 pub(crate) const FRAME_BUDGET: usize = 512;
-pub(crate) const SHARED_MEMORY_CAPACITY: usize = 1 << 20;
+pub(crate) const SHARED_MEMORY_CAPACITY: usize = 64 * 1024 * 1024; // 64 MB default
 pub(crate) const MAX_COMPILED_MODULES: usize = 4096;
 pub(crate) const MAX_PY_TRACKED_MODULES: usize = 4096;
 
@@ -67,7 +67,6 @@ pub(crate) fn shared_memory_capacity() -> usize {
         .ok()
         .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(SHARED_MEMORY_CAPACITY)
-        .max(SHARED_MEMORY_CAPACITY)
 }
 pub(crate) const MAX_CALL_DEPTH: usize = 512;
 pub(crate) const PYTHON_POOL_SIZE: usize = 2;

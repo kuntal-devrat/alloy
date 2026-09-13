@@ -380,21 +380,25 @@ impl SidecarMemory {
 
     pub fn write(&self, data: &[u8]) -> Result<usize, SharedMemoryError> {
         let len = data.len();
-        // CAS loop to avoid TOCTOU: claim space atomically.
+        // CAS loop to avoid TOCTOU: claim space atomically with ring-buffer wrap-around.
         loop {
             let offset = self.write_offset.load(Ordering::Acquire);
-            if offset + len > self.capacity {
+            let (target_offset, new_off) = if offset + len <= self.capacity {
+                (offset, offset + len)
+            } else if len <= self.capacity {
+                (0, len)
+            } else {
                 return Err(SharedMemoryError::Overflow {
                     requested: len,
-                    available: self.capacity.saturating_sub(offset),
+                    available: self.capacity,
                 });
-            }
-            if self.write_offset.compare_exchange_weak(offset, offset + len, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            };
+            if self.write_offset.compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 unsafe {
-                    let dst = self.ptr.as_ptr().add(offset);
+                    let dst = self.ptr.as_ptr().add(target_offset);
                     std::ptr::copy_nonoverlapping(data.as_ptr(), dst, len);
                 }
-                return Ok(offset);
+                return Ok(target_offset);
             }
         }
     }
@@ -431,68 +435,57 @@ impl SidecarMemory {
     }
 
     /// Reserve `size` bytes in the segment (8-byte aligned) and advance the
-    /// write cursor. Used for raw shared buffers.
+    /// write cursor. Used for raw shared buffers. Wraps around when reaching capacity.
     pub fn bump(&self, size: usize) -> Result<usize, SharedMemoryError> {
         loop {
             let offset = self.write_offset.load(Ordering::Acquire);
             let aligned = (offset + 7) & !7;
-            if aligned + size > self.capacity {
+            let (target_offset, new_off) = if aligned + size <= self.capacity {
+                (aligned, aligned + size)
+            } else if size <= self.capacity {
+                (0, size)
+            } else {
                 return Err(SharedMemoryError::Overflow {
                     requested: size,
-                    available: self.capacity.saturating_sub(aligned),
+                    available: self.capacity,
                 });
-            }
-            let new_off = aligned + size;
+            };
             if self.write_offset.compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                return Ok(aligned);
+                return Ok(target_offset);
             }
         }
     }
 
     pub fn allocate_float32_array(&self, values: &[f32]) -> Result<usize, SharedMemoryError> {
-        let byte_len = std::mem::size_of_val(values);
-        loop {
-            let offset = self.write_offset.load(Ordering::Acquire);
-            let aligned = (offset + 3) & !3;
-            if aligned + byte_len > self.capacity {
-                return Err(SharedMemoryError::Overflow {
-                    requested: byte_len,
-                    available: self.capacity.saturating_sub(aligned),
-                });
-            }
-            let new_off = aligned + byte_len;
-            if self.write_offset.compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                unsafe {
-                    let dst = self.ptr.as_ptr().add(aligned);
-                    let src = values.as_ptr() as *const u8;
-                    std::ptr::copy_nonoverlapping(src, dst, byte_len);
-                }
-                return Ok(aligned);
-            }
-        }
+        self.allocate_typed(values)
     }
 
     /// Generic typed-array allocation shared by the f32/f64/i32 entry points.
+    /// Uses ring-buffer wrap-around so long-running servers and video pipelines
+    /// never exhaust shared memory slots.
     fn allocate_typed<T>(&self, values: &[T]) -> Result<usize, SharedMemoryError> {
         let byte_len = std::mem::size_of_val(values);
         let align = std::mem::align_of::<T>().max(4);
         loop {
             let offset = self.write_offset.load(Ordering::Acquire);
             let aligned = (offset + align - 1) & !(align - 1);
-            if aligned + byte_len > self.capacity {
+            let (target_offset, new_off) = if aligned + byte_len <= self.capacity {
+                (aligned, aligned + byte_len)
+            } else if byte_len <= self.capacity {
+                (0, byte_len)
+            } else {
                 return Err(SharedMemoryError::Overflow {
                     requested: byte_len,
-                    available: self.capacity.saturating_sub(aligned),
+                    available: self.capacity,
                 });
-            }
-            let new_off = aligned + byte_len;
+            };
             if self.write_offset.compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 unsafe {
-                    let dst = self.ptr.as_ptr().add(aligned);
+                    let dst = self.ptr.as_ptr().add(target_offset);
                     let src = values.as_ptr() as *const u8;
                     std::ptr::copy_nonoverlapping(src, dst, byte_len);
                 }
-                return Ok(aligned);
+                return Ok(target_offset);
             }
         }
     }
@@ -855,5 +848,20 @@ mod tests {
         let off2 = mem.bump(4).unwrap();
         assert_eq!(off2 % 8, 0);
         assert!(off2 >= off + 10);
+    }
+
+    #[test]
+    fn test_ring_buffer_wrap() {
+        let mem = SidecarMemory::new(100);
+        let off1 = mem.allocate_float32_array(&[1.0, 2.0]).unwrap();
+        assert_eq!(off1, 0);
+        let off2 = mem.bump(88).unwrap();
+        assert_eq!(off2, 8);
+        // Off is now 96. 96 + 8 = 104 > 100, so it safely wraps back to 0.
+        let off3 = mem.allocate_float32_array(&[3.0, 4.0]).unwrap();
+        assert_eq!(off3, 0);
+        assert_eq!(mem.get_float32_slice(off3, 2).unwrap(), &[3.0, 4.0]);
+        // Allocations strictly larger than capacity still return an error.
+        assert!(mem.allocate_float32_array(&[0.0; 30]).is_err());
     }
 }

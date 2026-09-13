@@ -50,6 +50,9 @@ http.createServer(async (req, res) => {
         // 2a. Allocate pixel buffer directly inside OS Shared Memory Segment
         const memStart = Date.now();
         const sharedBuffer = memory.allocateFloat32Array(pixels);
+        if (!sharedBuffer || !sharedBuffer.ptr) {
+            return res.status(500).json({ error: "Failed to allocate shared memory buffer" });
+        }
         const memAllocMs = Date.now() - memStart;
 
         // 2b. Zero-Copy Pointer Handoff to Python sidecar
@@ -87,6 +90,9 @@ http.createServer(async (req, res) => {
         }
 
         const buf = memory.allocateFloat32Array(testPixels);
+        if (!buf || !buf.ptr) {
+            return res.status(500).json({ error: "Failed to allocate benchmark buffer" });
+        }
         const iters = 20;
         const t0 = Date.now();
 
