@@ -117,8 +117,8 @@ pub fn sweep_segments_now() -> SweepStats {
 pub fn pid_alive(pid: u32) -> bool {
     // kill(pid, 0): 0 → exists and signalable; EPERM → exists but owned by
     // someone else. Anything else (ESRCH) means the pid is free.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    let res = unsafe { libc::kill(pid as i32, 0) };
+    res == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 // On Windows the sweep guards live segments via open-file semantics (the

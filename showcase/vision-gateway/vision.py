@@ -13,6 +13,12 @@ try:
 except ImportError:
     HAS_NUMPY = False
 
+# Declare read_bytes stub for IDE type-checking and linters.
+# At runtime, Alloy's sidecar bootstrap injects the zero-copy shared memory reader.
+if "read_bytes" not in globals():
+    def read_bytes(ptr: int, size: int) -> bytes:
+        raise NotImplementedError("read_bytes is injected dynamically by the Alloy runtime")
+
 CLASSES = [
     "person", "car", "bicycle", "traffic_light", "dog", 
     "backpack", "laptop", "drone", "pedestrian"
