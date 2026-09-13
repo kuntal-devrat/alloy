@@ -2,12 +2,26 @@
 name = "alloy-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Command-line interface, REPL, package manager, and language server protocol (LSP) daemon for the Alloy runtime."
+
+[lints]
+workspace = true
 
 [dependencies]
-alloy-rt = { path = "../alloy-rt" }
-alloy-vm = { path = "../alloy-vm" }
-alloy-core = { path = "../alloy-core" }
+alloy-rt = { path = "../alloy-rt", version = "0.1.0" }
+alloy-vm = { path = "../alloy-vm", version = "0.1.0" }
+alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.1.0" }
 tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
 
 [[bin]]
 name = "alloy"

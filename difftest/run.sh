@@ -15,7 +15,13 @@
 
 set -u
 DIR="${1:-$(dirname "$0")}"
-ALLOY="${ALLOY:-./target/debug/alloy.exe}"
+if [ -z "${ALLOY:-}" ]; then
+    if [ -f "./target/debug/alloy.exe" ]; then
+        ALLOY="./target/debug/alloy.exe"
+    else
+        ALLOY="./target/debug/alloy"
+    fi
+fi
 NODE="node"
 TMPA="$(mktemp)"
 TMPN="$(mktemp)"

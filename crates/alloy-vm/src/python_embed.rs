@@ -510,7 +510,7 @@ fn close_library(h: Handle) {
 unsafe fn get_sym(h: Handle, name: &CStr) -> Result<*mut std::ffi::c_void, String> {
     use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
     match GetProcAddress(h, name.as_ptr() as *const u8) {
-        Some(p) => Ok(std::mem::transmute::<unsafe extern "system" fn() -> isize, *mut std::ffi::c_void>(p)),
+        Some(p) => Ok(p as *mut std::ffi::c_void),
         None => Err(format!("python library is missing symbol {}", name.to_string_lossy())),
     }
 }
@@ -635,7 +635,7 @@ fn push_dir_candidates(candidates: &mut Vec<Vec<u8>>, dir: &str) {
     dlls.sort();
     for f in dlls {
         let cand = format!("{}\\{}\0", dir, f).into_bytes();
-        if !candidates.iter().any(|c| *c == cand) {
+        if !candidates.contains(&cand) {
             candidates.push(cand);
         }
     }

@@ -1,0 +1,59 @@
+{
+  "name": "alloy-vscode",
+  "displayName": "Alloy Language Support",
+  "description": "Rich language support, syntax highlighting, and LSP integration for the Alloy runtime (.ajs)",
+  "version": "0.1.0",
+  "publisher": "alloy-lang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Snippets"
+  ],
+  "activationEvents": [
+    "onLanguage:alloy"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "alloy",
+        "aliases": ["Alloy", "alloy"],
+        "extensions": [".ajs", ".alloy"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "alloy",
+        "scopeName": "source.alloy",
+        "path": "./syntaxes/alloy.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "alloy.restartLsp",
+        "title": "Alloy: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Alloy Configuration",
+      "properties": {
+        "alloy.executablePath": {
+          "type": "string",
+          "default": "alloy",
+          "description": "Path to the alloy CLI binary."
+        },
+        "alloy.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the Alloy Language Server."
+        }
+      }
+    }
+  }
+}

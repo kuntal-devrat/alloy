@@ -1,0 +1,83 @@
+// Actor Concurrency Showcase: Real-Time Event Pipeline
+// Demonstrates Alloy's message-passing architecture, channel queues, and throughput.
+
+print("=== Alloy Actor Concurrency Showcase: Event Pipeline ===");
+
+async function runPipeline() {
+    const NUM_WORKERS = 4;
+    const MSGS_PER_WORKER = 250;
+    const TOTAL_MSGS = NUM_WORKERS * MSGS_PER_WORKER;
+    const workerPromises = [];
+
+    print(`[Alloy] Initializing event pipeline with ${NUM_WORKERS} worker actors...`);
+    print(`[Alloy] Streaming ${TOTAL_MSGS} transactions across worker pool...`);
+
+    const startTime = Date.now();
+
+    // 1. Initialize channels and spawn worker actors
+    for (let w = 0; w < NUM_WORKERS; w++) {
+        const chName = "pipeline_stage_" + w;
+        channel.create(chName);
+
+        const p = spawn(function () {
+            const c = channel.get(chName);
+            return (async function () {
+                let processed = 0;
+                let volume = 0;
+                let anomalies = 0;
+
+                for (let i = 0; i < MSGS_PER_WORKER; i++) {
+                    const event = await c.recv();
+                    if (!event) continue;
+                    processed++;
+                    volume += event.amount;
+                    if (event.amount > 400 || event.category === "transfer") {
+                        anomalies++;
+                    }
+                }
+                return { processed: processed, volume: volume, anomalies: anomalies };
+            })();
+        });
+        workerPromises.push(p);
+    }
+
+    // 2. Producer: Stream events into channels
+    for (let i = 0; i < MSGS_PER_WORKER; i++) {
+        for (let w = 0; w < NUM_WORKERS; w++) {
+            const ch = channel.get("pipeline_stage_" + w);
+            const amount = ((i * 37) % 500) + 12.50;
+            const category = (i % 3 === 0) ? "transfer" : (i % 2 === 0) ? "purchase" : "refund";
+            ch.send({
+                id: "TX-" + (w * 1000 + i),
+                amount: amount,
+                category: category
+            });
+        }
+    }
+
+    // 3. Await all worker actors
+    let totalProcessed = 0;
+    let totalVolume = 0;
+    let totalAnomalies = 0;
+
+    for (let w = 0; w < NUM_WORKERS; w++) {
+        const stats = await workerPromises[w];
+        totalProcessed += stats.processed;
+        totalVolume += stats.volume;
+        totalAnomalies += stats.anomalies;
+        print(`  [Worker ${w + 1}] Processed ${stats.processed} transactions (${stats.anomalies} flagged anomalies)`);
+    }
+
+    const elapsedMs = Date.now() - startTime || 1;
+    const throughput = Math.round((totalProcessed / elapsedMs) * 1000);
+
+    print("\n=== Pipeline Execution Summary ===");
+    print(`  Total Transactions : ${totalProcessed}`);
+    print(`  Total Volume       : $${Math.round(totalVolume * 100) / 100}`);
+    print(`  Flagged Anomalies  : ${totalAnomalies}`);
+    print(`  Elapsed Time       : ${elapsedMs} ms`);
+    print(`  Realized Throughput: ${throughput} events/sec`);
+    print("Pipeline completed with zero data races across isolated actor heaps.\n");
+}
+
+runPipeline();

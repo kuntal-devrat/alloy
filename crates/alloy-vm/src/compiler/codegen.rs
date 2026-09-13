@@ -1,3034 +1,13 @@
+use crate::ast::*;
 use crate::bytecode::Program;
+use crate::compiler::error::CompileError;
+use crate::compiler::lexer::Lexer;
+use crate::compiler::parser::Parser;
+use crate::compiler::scope::*;
+use crate::compiler::token::*;
 use crate::opcode::Opcode;
 use alloy_core::heap::{ArenaHeap, HeapGuard};
 use alloy_core::value::Value;
-
-#[derive(Debug)]
-pub enum CompileError {
-    UnexpectedToken(String),
-    UnterminatedString,
-    InvalidEscape,
-    InvalidNumber(String),
-    UndefinedVariable(String),
-    CannotShadowBuiltin(String),
-    BreakOutsideLoop,
-    AwaitOutsideAsync,
-    UndefinedLabel(String),
-    ContinueNonLoop(String),
-    /// `counter = 5` where `counter` came from `import { counter }`: ESM
-    /// rejects this as a SyntaxError — assigning to a live-import cell would
-    /// mutate the module, so it is a loud compile error here too.
-    AssignToImport(String),
-}
-
-impl std::fmt::Display for CompileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnexpectedToken(s) => write!(f, "unexpected token: {}", s),
-            Self::UnterminatedString => write!(f, "unterminated string literal"),
-            Self::InvalidEscape => write!(f, "invalid escape sequence"),
-            Self::InvalidNumber(s) => write!(f, "invalid number: {}", s),
-            Self::UndefinedVariable(s) => write!(f, "undefined variable: {}", s),
-            Self::CannotShadowBuiltin(s) => write!(f, "cannot shadow builtin '{}'", s),
-            Self::BreakOutsideLoop => write!(f, "break/continue outside of a loop"),
-            Self::AwaitOutsideAsync => write!(f, "'await' is only allowed inside an async function"),
-            Self::UndefinedLabel(s) => write!(f, "undefined label: {}", s),
-            Self::ContinueNonLoop(s) => write!(f, "'continue' to non-loop label: {}", s),
-            Self::AssignToImport(s) => write!(f, "cannot assign to imported binding '{}'", s),
-        }
-    }
-}
-
-impl std::error::Error for CompileError {}
-
-/// Tokens plus the source line each token starts on (1-based). The parser uses
-/// the lines to tell a same-line adjacency error (`print(1 2)`) from a
-/// statement boundary at a newline (`const f = x => x` then `print(f())` —
-/// the engine treats a newline as an implicit statement separator).
-#[derive(Debug, Clone, PartialEq)]
-struct TokenStream {
-    tokens: Vec<Token>,
-    lines: Vec<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum TemplatePart {
-    /// Literal text between `${...}` interpolations.
-    Lit(String),
-    /// Tokens of an interpolated expression, parsed by the parser.
-    Expr(TokenStream),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
-    Number(f64),
-    Int(i64),
-    StringLit(String),
-    TemplateLit(Vec<TemplatePart>),
-    True, False, Null, Undefined,
-    Ident(String),
-    Plus, Minus, Star, Slash, Percent,
-    Assign, EqEq, EqEqEq, Neq, NeqEq,
-    Lt, Gt, Lte, Gte,
-    Not, And, Or, PlusAssign, MinusAssign, StarAssign, SlashAssign, PercentAssign,
-    BitAnd, BitOr, BitXor, BitNot,
-    BitAndAssign, BitOrAssign, BitXorAssign,
-    Shl, Shr, UShr, ShlAssign, ShrAssign, UShrAssign,
-    StarStar, StarStarAssign,
-    PlusPlus, MinusMinus,
-    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Semicolon, Comma, Colon, Dot, DotDotDot, Arrow, QuestionDot, QuestionQuestion,
-    AndAssign, OrAssign, NullishAssign,
-    Let, Const, Var, Function, Return, If, Else,
-    While, Do, For, In, Of, Import, Export, From, As,
-    Async, Await, New, Typeof, Void, Delete, Question,
-    Break, Continue, Try, Catch, Finally, Throw,
-    Switch, Case, Default,
-    Class, Extends, Super, This, Static, InstanceOf,
-    /// `/pattern/flags` — the lexer already validated pattern syntax and
-    /// flags against Node's rules (loud compile error otherwise).
-    Regex { pattern: String, flags: String },
-    Eof,
-}
-
-struct Lexer {
-    src: Vec<char>,
-    pos: usize,
-    /// `line_of[i]` = the 1-based source line of the char at index `i` (one
-    /// extra entry so `pos == src.len()` at Eof is valid).
-    line_of: Vec<u32>,
-}
-
-impl Lexer {
-    fn new(s: &str) -> Self {
-        let src: Vec<char> = s.chars().collect();
-        let mut line_of = vec![1u32; src.len() + 1];
-        let mut line = 1u32;
-        for (i, &c) in src.iter().enumerate() {
-            if c == '\n' {
-                line += 1;
-            }
-            line_of[i + 1] = line;
-        }
-        Self { src, pos: 0, line_of }
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.src.get(self.pos).copied()
-    }
-
-    fn adv(&mut self) -> Option<char> {
-        let c = self.src.get(self.pos).copied();
-        if c.is_some() { self.pos += 1; }
-        c
-    }
-
-    fn skip_ws(&mut self) {
-        while let Some(ch) = self.peek() {
-            if ch.is_whitespace() {
-                self.adv();
-            } else if ch == '/' && self.pos + 1 < self.src.len() {
-                if self.src[self.pos + 1] == '/' {
-                    while self.peek() != Some('\n') && self.peek().is_some() {
-                        self.adv();
-                    }
-                } else if self.src[self.pos + 1] == '*' {
-                    self.adv();
-                    self.adv();
-                    loop {
-                        if let Some(c) = self.adv() {
-                            if c == '*' && self.peek() == Some('/') {
-                                self.adv();
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn read_hex_digit(&mut self) -> Result<u32, CompileError> {
-        match self.adv().and_then(|c| c.to_digit(16)) {
-            Some(d) => Ok(d),
-            None => Err(CompileError::InvalidEscape),
-        }
-    }
-
-    fn read_hex4(&mut self) -> Result<u32, CompileError> {
-        let mut n = 0u32;
-        for _ in 0..4 {
-            n = n * 16 + self.read_hex_digit()?;
-        }
-        Ok(n)
-    }
-
-    /// Full JS string escapes: `\n \t \r \b \f \v \0 \\ \" \' \xNN
-    /// \uNNNN \u{...}` (surrogate pairs combined), line continuations
-    /// (`\<newline>` → nothing), and the JS rule that an unknown escape
-    /// drops the backslash (`\q` → `q`).
-    fn read_str(&mut self, q: char) -> Result<String, CompileError> {
-        let mut s = String::new();
-        loop {
-            match self.adv() {
-                None => return Err(CompileError::UnterminatedString),
-                Some(c) if c == q => break,
-                Some('\\') => match self.adv() {
-                    Some('n') => s.push('\n'),
-                    Some('t') => s.push('\t'),
-                    Some('r') => s.push('\r'),
-                    Some('b') => s.push('\u{8}'),
-                    Some('f') => s.push('\u{C}'),
-                    Some('v') => s.push('\u{B}'),
-                    Some('0') => s.push('\0'),
-                    Some('\\') => s.push('\\'),
-                    Some('"') => s.push('"'),
-                    Some('\'') => s.push('\''),
-                    Some('x') => {
-                        let hi = self.read_hex_digit()?;
-                        let lo = self.read_hex_digit()?;
-                        s.push(char::from_u32(hi * 16 + lo).unwrap_or('\u{FFFD}'));
-                    }
-                    Some('u') => {
-                        if self.peek() == Some('{') {
-                            self.adv();
-                            let mut n: u32 = 0;
-                            let mut any = false;
-                            loop {
-                                match self.peek() {
-                                    Some('}') => {
-                                        self.adv();
-                                        break;
-                                    }
-                                    Some(c) => match c.to_digit(16) {
-                                        Some(d) => {
-                                            n = n * 16 + d;
-                                            any = true;
-                                            self.adv();
-                                        }
-                                        None => return Err(CompileError::InvalidEscape),
-                                    },
-                                    None => return Err(CompileError::InvalidEscape),
-                                }
-                            }
-                            if !any {
-                                return Err(CompileError::InvalidEscape);
-                            }
-                            s.push(char::from_u32(n).unwrap_or('\u{FFFD}'));
-                        } else {
-                            let hi = self.read_hex4()?;
-                            if (0xD800..=0xDBFF).contains(&hi) && self.peek() == Some('\\') {
-                                // Surrogate pair `\uD800\uDC00` → one code point.
-                                let save = self.pos;
-                                self.adv();
-                                if self.adv() == Some('u') {
-                                    let lo = self.read_hex4()?;
-                                    if (0xDC00..=0xDFFF).contains(&lo) {
-                                        let cp =
-                                            0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
-                                        s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
-                                    } else {
-                                        self.pos = save;
-                                        s.push(char::from_u32(hi).unwrap_or('\u{FFFD}'));
-                                    }
-                                } else {
-                                    self.pos = save;
-                                    s.push(char::from_u32(hi).unwrap_or('\u{FFFD}'));
-                                }
-                            } else {
-                                s.push(char::from_u32(hi).unwrap_or('\u{FFFD}'));
-                            }
-                        }
-                    }
-                    // Line continuation: backslash-newline produces nothing.
-                    Some('\n') => {}
-                    Some(c) => s.push(c),
-                    None => return Err(CompileError::UnterminatedString),
-                },
-                Some(c) => s.push(c),
-            }
-        }
-        Ok(s)
-    }
-
-    /// Scan a template literal body starting after the opening backtick.
-    /// Produces literal parts and recursively-tokenized `${...}` expressions.
-    fn read_template(&mut self) -> Result<Token, CompileError> {
-        let mut parts = Vec::new();
-        let mut lit = String::new();
-        loop {
-            match self.adv() {
-                None => return Err(CompileError::UnterminatedString),
-                Some('`') => break,
-                Some('\\') => match self.adv() {
-                    Some('n') => lit.push('\n'),
-                    Some('t') => lit.push('\t'),
-                    Some('`') => lit.push('`'),
-                    Some('$') => lit.push('$'),
-                    Some('\\') => lit.push('\\'),
-                    Some(c) => lit.push(c),
-                    None => return Err(CompileError::UnterminatedString),
-                },
-                Some('$') if self.peek() == Some('{') => {
-                    self.adv();
-                    if !lit.is_empty() {
-                        parts.push(TemplatePart::Lit(std::mem::take(&mut lit)));
-                    }
-                    let raw = self.read_template_expr_raw()?;
-                    let toks = Lexer::new(&raw).tokenize()?;
-                    parts.push(TemplatePart::Expr(toks));
-                }
-                Some(c) => lit.push(c),
-            }
-        }
-        if !lit.is_empty() {
-            parts.push(TemplatePart::Lit(lit));
-        }
-        Ok(Token::TemplateLit(parts))
-    }
-
-    /// Collect the raw text of a `${ ... }` expression, tracking brace depth
-    /// and skipping strings and nested templates so braces inside them don't
-    /// terminate the segment early.
-    fn read_template_expr_raw(&mut self) -> Result<String, CompileError> {
-        let mut s = String::new();
-        let mut depth = 1usize;
-        loop {
-            match self.adv() {
-                None => return Err(CompileError::UnterminatedString),
-                Some('{') => {
-                    depth += 1;
-                    s.push('{');
-                }
-                Some('}') => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Ok(s);
-                    }
-                    s.push('}');
-                }
-                Some('"') | Some('\'') => {
-                    let q = self.src[self.pos - 1];
-                    s.push(q);
-                    loop {
-                        match self.adv() {
-                            None => return Err(CompileError::UnterminatedString),
-                            Some('\\') => {
-                                s.push('\\');
-                                if let Some(e) = self.adv() {
-                                    s.push(e);
-                                }
-                            }
-                            Some(c) if c == q => {
-                                s.push(c);
-                                break;
-                            }
-                            Some(c) => s.push(c),
-                        }
-                    }
-                }
-                Some('`') => {
-                    s.push('`');
-                    self.scan_template_raw(&mut s)?;
-                }
-                Some(c) => s.push(c),
-            }
-        }
-    }
-
-    /// Scan one nested template literal into `out`, starting just after its
-    /// opening backtick.
-    fn scan_template_raw(&mut self, out: &mut String) -> Result<(), CompileError> {
-        loop {
-            match self.adv() {
-                None => return Err(CompileError::UnterminatedString),
-                Some('`') => {
-                    out.push('`');
-                    return Ok(());
-                }
-                Some('\\') => {
-                    out.push('\\');
-                    if let Some(e) = self.adv() {
-                        out.push(e);
-                    }
-                }
-                Some('$') if self.peek() == Some('{') => {
-                    self.adv();
-                    out.push_str("${");
-                    let raw = self.read_template_expr_raw()?;
-                    out.push_str(&raw);
-                    out.push('}');
-                }
-                Some(c) => out.push(c),
-            }
-        }
-    }
-
-    fn read_num(&mut self, first: char) -> Result<Token, CompileError> {
-        // Radix-prefixed literals: `0x`/`0X` hex, `0b`/`0B` binary, `0o`/`0O`
-        // octal. Anything after the prefix that isn't a digit of that radix
-        // (including a missing digit run) is a loud error, like JS — these
-        // used to silently misparse (`0xFF` became `0` + identifier `xFF`).
-        if first == '0' {
-            match self.peek() {
-                Some('x') | Some('X') => return self.read_radix_num(16),
-                Some('b') | Some('B') => return self.read_radix_num(2),
-                Some('o') | Some('O') => return self.read_radix_num(8),
-                _ => {}
-            }
-        }
-        let mut s = String::new();
-        s.push(first);
-        // A leading `.` (`read_num('.')` for `.5`) is itself the fraction
-        // point — subsequent dots start a member access.
-        let mut fl = first == '.';
-        while let Some(ch) = self.peek() {
-            if ch.is_ascii_digit() {
-                s.push(ch);
-                self.adv();
-            } else if ch == '.' && !fl {
-                fl = true;
-                s.push(ch);
-                self.adv();
-            } else {
-                break;
-            }
-        }
-        // Optional exponent part: `e`/`E` followed by [sign] digits. Only
-        // consumed when a digit follows, so `1ex` stays `1` + ident `ex`.
-        if matches!(self.peek(), Some('e') | Some('E')) {
-            let at = |lex: &Lexer, off: usize| lex.src.get(lex.pos + off).copied();
-            let has_exp = match (at(self, 1), at(self, 2)) {
-                (Some(d), _) if d.is_ascii_digit() => true,
-                (Some('+') | Some('-'), Some(d)) if d.is_ascii_digit() => true,
-                _ => false,
-            };
-            if has_exp {
-                s.push(self.adv().unwrap()); // e / E
-                if matches!(self.peek(), Some('+') | Some('-')) {
-                    s.push(self.adv().unwrap());
-                }
-                while let Some(ch) = self.peek() {
-                    if ch.is_ascii_digit() {
-                        s.push(ch);
-                        self.adv();
-                    } else {
-                        break;
-                    }
-                }
-                fl = true;
-            }
-        }
-        // A BigInt suffix (`10n`, `1.5n`) immediately after any numeric
-        // literal is not supported — error loudly instead of misparsing `n`
-        // as an identifier (`print(10n)` used to print `10 undefined`).
-        if self.peek() == Some('n') {
-            return Err(CompileError::InvalidNumber(
-                "BigInt literals are not supported".to_string(),
-            ));
-        }
-        // Legacy octal: an integer literal with a leading zero whose digits
-        // are all 0-7 is octal in sloppy JS (`017` = 15); a non-octal digit
-        // (`08`, `09`) falls back to decimal. A fraction or exponent on a
-        // legacy-octal literal is a SyntaxError (`01.5`, `017e2`).
-        let int_part = s.split(['.', 'e', 'E']).next().unwrap_or(&s);
-        if int_part.len() > 1
-            && int_part.starts_with('0')
-            && int_part.bytes().all(|b| (b'0'..=b'7').contains(&b))
-        {
-            if fl {
-                return Err(CompileError::InvalidNumber(
-                    "legacy octal literals cannot have a fraction or exponent".to_string(),
-                ));
-            }
-            return match u128::from_str_radix(int_part, 8) {
-                Ok(v) if v <= i64::MAX as u128 => Ok(Token::Int(v as i64)),
-                Ok(v) => Ok(Token::Number(v as f64)),
-                Err(_) => Ok(Token::Number(f64::NAN)),
-            };
-        }
-        if fl {
-            Ok(Token::Number(s.parse().unwrap_or(0.0)))
-        } else {
-            match s.parse::<i64>() {
-                Ok(v) => Ok(Token::Int(v)),
-                // Literal too big for i64 (`99999999999999999999`): JS reads
-                // it as the f64 it rounds to.
-                Err(_) => Ok(Token::Number(s.parse().unwrap_or(0.0))),
-            }
-        }
-    }
-
-    /// A radix-prefixed literal (`0x…`, `0b…`, `0o…`); the leading `0` has
-    /// already been consumed by `read_num`.
-    fn read_radix_num(&mut self, radix: u32) -> Result<Token, CompileError> {
-        let digits: &str = match radix {
-            16 => "0123456789abcdef",
-            2 => "01",
-            _ => "01234567",
-        };
-        self.adv(); // consume x / b / o
-        let mut s = String::new();
-        while let Some(ch) = self.peek() {
-            // A `n` suffix makes this a BigInt literal (`0x10n`) — handled
-            // below with the dedicated message.
-            if ch == 'n' {
-                break;
-            }
-            if ch.is_ascii_alphanumeric() || ch == '_' {
-                if digits.contains(ch.to_ascii_lowercase()) {
-                    s.push(ch);
-                    self.adv();
-                } else {
-                    // `0b2`, `0o8`, `0xG` are SyntaxErrors in JS.
-                    return Err(CompileError::InvalidNumber(format!(
-                        "invalid digit '{}' in radix-{} literal",
-                        ch, radix
-                    )));
-                }
-            } else {
-                break;
-            }
-        }
-        if s.is_empty() {
-            return Err(CompileError::InvalidNumber(
-                "missing digits in radix literal".to_string(),
-            ));
-        }
-        // `0x10n`, `0b101n` are BigInt literals — unsupported, loud error.
-        if self.peek() == Some('n') {
-            return Err(CompileError::InvalidNumber(
-                "BigInt literals are not supported".to_string(),
-            ));
-        }
-        // Radix literals cannot carry a fraction or exponent. A `.` after a
-        // radix literal starts a MEMBER ACCESS, not a fraction: `0x10.toString`
-        // is `(0x10).toString` (V8 accepts it; `0x1.5` still errors below, in
-        // the parser, as a member access with a numeric property). `e`/`E` are
-        // hex digits (consumed above for radix 16) or invalid digits (radix
-        // 2/8, caught above) — so nothing to reject here.
-        match u128::from_str_radix(&s, radix) {
-            Ok(v) if v <= i64::MAX as u128 => Ok(Token::Int(v as i64)),
-            Ok(v) => Ok(Token::Number(v as f64)),
-            // Absurdly long literals beyond u128: fold to f64.
-            Err(_) => {
-                let mut v = 0.0f64;
-                for c in s.chars() {
-                    v = v * radix as f64 + c.to_digit(radix).unwrap_or(0) as f64;
-                }
-                Ok(Token::Number(v))
-            }
-        }
-    }
-
-    fn read_ident(&mut self, first: char) -> Token {
-        let mut s = String::new();
-        s.push(first);
-        while let Some(ch) = self.peek() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '$' {
-                s.push(ch);
-                self.adv();
-            } else {
-                break;
-            }
-        }
-        match s.as_str() {
-            "true" => Token::True,
-            "false" => Token::False,
-            "null" => Token::Null,
-            "undefined" => Token::Undefined,
-            "let" => Token::Let,
-            "const" => Token::Const,
-            "var" => Token::Var,
-            "function" => Token::Function,
-            "return" => Token::Return,
-            "if" => Token::If,
-            "else" => Token::Else,
-            "while" => Token::While,
-            "do" => Token::Do,
-            "for" => Token::For,
-            "in" => Token::In,
-            "of" => Token::Of,
-            "import" => Token::Import,
-            "export" => Token::Export,
-            "from" => Token::From,
-            "as" => Token::As,
-            "async" => Token::Async,
-            "await" => Token::Await,
-            "new" => Token::New,
-            "typeof" => Token::Typeof,
-            "void" => Token::Void,
-            "delete" => Token::Delete,
-            "break" => Token::Break,
-            "continue" => Token::Continue,
-            "try" => Token::Try,
-            "catch" => Token::Catch,
-            "finally" => Token::Finally,
-            "throw" => Token::Throw,
-            "switch" => Token::Switch,
-            "case" => Token::Case,
-            "default" => Token::Default,
-            "class" => Token::Class,
-            "extends" => Token::Extends,
-            "super" => Token::Super,
-            "this" => Token::This,
-            "static" => Token::Static,
-            "instanceof" => Token::InstanceOf,
-            _ => Token::Ident(s),
-        }
-    }
-
-    /// Push a token, recording the source line its first char starts on.
-    fn push_tok(
-        &self,
-        t: &mut Vec<Token>,
-        lines: &mut Vec<u32>,
-        start: usize,
-        tok: Token,
-    ) {
-        lines.push(self.line_of[start]);
-        t.push(tok);
-    }
-
-    /// Can a `/` at this point start a regex literal? JS lexes `/` as a regex
-    /// when the previous token cannot end an expression (operators, open
-    /// brackets, keywords like `return`/`typeof`/`in`), and as division after
-    /// expression-ending tokens (identifiers, literals, `)`, `]`, `}`,
-    /// postfix `++`/`--`). The one genuinely ambiguous case (`x = {} / 2`)
-    /// is resolved the way real lexers do: `}` never allows a regex.
-    fn regex_allowed(&self, prev: Option<&Token>) -> bool {
-        let Some(p) = prev else { return true };
-        !matches!(
-            p,
-            Token::Ident(_)
-                | Token::Number(_)
-                | Token::Int(_)
-                | Token::StringLit(_)
-                | Token::TemplateLit(_)
-                | Token::True
-                | Token::False
-                | Token::Null
-                | Token::Undefined
-                | Token::This
-                | Token::Super
-                | Token::RParen
-                | Token::RBracket
-                | Token::RBrace
-                | Token::PlusPlus
-                | Token::MinusMinus
-                | Token::Regex { .. }
-        )
-    }
-
-    /// Read a regex literal: `/pattern/flags`. The pattern is read raw with
-    /// `\` escaping (inside and outside character classes, where `/` is
-    /// literal); an unterminated pattern, a raw newline, or an invalid flag
-    /// string is a compile error, and the pattern is validated by the regex
-    /// engine so bad syntax fails at compile time like Node's parse-time
-    /// SyntaxError.
-    fn read_regex(&mut self) -> Result<(String, String), CompileError> {
-        self.adv(); // opening /
-        let mut pattern = String::new();
-        let mut in_class = false;
-        loop {
-            let Some(c) = self.peek() else {
-                return Err(CompileError::UnexpectedToken(
-                    "unterminated regular expression literal".to_string(),
-                ));
-            };
-            self.adv();
-            match c {
-                '\\' => {
-                    let Some(e) = self.peek() else {
-                        return Err(CompileError::UnexpectedToken(
-                            "unterminated regular expression literal".to_string(),
-                        ));
-                    };
-                    pattern.push('\\');
-                    pattern.push(e);
-                    self.adv();
-                }
-                '/' if !in_class => break,
-                '[' => {
-                    in_class = true;
-                    pattern.push(c);
-                }
-                ']' => {
-                    in_class = false;
-                    pattern.push(c);
-                }
-                '\n' | '\r' => {
-                    return Err(CompileError::UnexpectedToken(
-                        "newline not allowed in regular expression literal".to_string(),
-                    ));
-                }
-                _ => pattern.push(c),
-            }
-        }
-        let mut flags = String::new();
-        while let Some(c) = self.peek() {
-            if c.is_ascii_alphabetic() {
-                flags.push(c);
-                self.adv();
-            } else {
-                break;
-            }
-        }
-        let f = alloy_core::regex::RegexFlags::parse(&flags).map_err(|e| {
-            CompileError::UnexpectedToken(format!("invalid regular expression: {e}"))
-        })?;
-        alloy_core::regex::compile(&pattern, f).map_err(|e| {
-            CompileError::UnexpectedToken(format!("invalid regular expression: {e}"))
-        })?;
-        Ok((pattern, flags))
-    }
-
-    fn tokenize(&mut self) -> Result<TokenStream, CompileError> {
-        let mut t = Vec::new();
-        let mut lines = Vec::new();
-        loop {
-            self.skip_ws();
-            let start = self.pos;
-            let ch = match self.peek() {
-                None => { self.push_tok(&mut t, &mut lines, start, Token::Eof); break; }
-                Some(c) => c,
-            };
-            match ch {
-                '(' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::LParen); }
-                ')' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::RParen); }
-                '{' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::LBrace); }
-                '}' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::RBrace); }
-                '[' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::LBracket); }
-                ']' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::RBracket); }
-                ';' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::Semicolon); }
-                ',' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::Comma); }
-                ':' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::Colon); }
-                '?' => {
-                    self.adv();
-                    // `?.` is optional chaining UNLESS the next char is a
-                    // digit (`a ?.5 : 0` is the ternary `a ? 0.5 : 0`, per
-                    // the JS spec's lookahead).
-                    if self.peek() == Some('.') && !self.src.get(self.pos + 1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                        self.adv();
-                        self.push_tok(&mut t, &mut lines, start, Token::QuestionDot);
-                    } else if self.peek() == Some('?') {
-                        self.adv();
-                        // `??=` (nullish logical assignment).
-                        if self.peek() == Some('=') {
-                            self.adv();
-                            self.push_tok(&mut t, &mut lines, start, Token::NullishAssign);
-                        } else {
-                            self.push_tok(&mut t, &mut lines, start, Token::QuestionQuestion);
-                        }
-                    } else {
-                        self.push_tok(&mut t, &mut lines, start, Token::Question);
-                    }
-                }
-                '.' => {
-                    self.adv();
-                    if self.peek() == Some('.') && self.src.get(self.pos + 1) == Some(&'.') {
-                        self.adv();
-                        self.adv();
-                        self.push_tok(&mut t, &mut lines, start, Token::DotDotDot);
-                    } else if self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                        // `.5` is a valid number literal in JS (`print(.5)` →
-                        // 0.5); the leading dot is the fraction point.
-                        let num = self.read_num('.')?;
-                        self.push_tok(&mut t, &mut lines, start, num);
-                    } else {
-                        self.push_tok(&mut t, &mut lines, start, Token::Dot);
-                    }
-                }
-                '+' => {
-                    self.adv();
-                    if self.peek() == Some('+') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::PlusPlus); }
-                    else if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::PlusAssign); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::Plus); }
-                }
-                '-' => {
-                    self.adv();
-                    if self.peek() == Some('-') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::MinusMinus); }
-                    else if self.peek() == Some('>') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::Arrow); }
-                    else if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::MinusAssign); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::Minus); }
-                }
-                '*' => {
-                    self.adv();
-                    if self.peek() == Some('*') {
-                        self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::StarStarAssign); }
-                        else { self.push_tok(&mut t, &mut lines, start, Token::StarStar); }
-                    } else if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::StarAssign); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::Star); }
-                }
-                '/' => {
-                    // A `/` after a token that cannot end an expression starts
-                    // a regex literal; after an expression-ending token it is
-                    // division (`a / b`, `a++ / b`). The previous token is
-                    // `t.last()` — the regex branch runs before pushing.
-                    if self.regex_allowed(t.last()) {
-                        let (pattern, flags) = self.read_regex()?;
-                        self.push_tok(&mut t, &mut lines, start, Token::Regex { pattern, flags });
-                    } else {
-                        self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::SlashAssign); }
-                        else { self.push_tok(&mut t, &mut lines, start, Token::Slash); }
-                    }
-                }
-                '%' => {
-                    self.adv();
-                    if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::PercentAssign); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::Percent); }
-                }
-                '=' => {
-                    self.adv();
-                    if self.peek() == Some('>') {
-                        // `=>` arrow function
-                        self.adv();
-                        self.push_tok(&mut t, &mut lines, start, Token::Arrow);
-                    } else if self.peek() == Some('=') {
-                        self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::EqEqEq); }
-                        else { self.push_tok(&mut t, &mut lines, start, Token::EqEq); }
-                    } else { self.push_tok(&mut t, &mut lines, start, Token::Assign); }
-                }
-                '!' => {
-                    self.adv();
-                    if self.peek() == Some('=') {
-                        self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::NeqEq); }
-                        else { self.push_tok(&mut t, &mut lines, start, Token::Neq); }
-                    } else { self.push_tok(&mut t, &mut lines, start, Token::Not); }
-                }
-                '<' => {
-                    self.adv();
-                    if self.peek() == Some('<') {
-                        self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::ShlAssign); }
-                        else { self.push_tok(&mut t, &mut lines, start, Token::Shl); }
-                    } else if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::Lte); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::Lt); }
-                }
-                '>' => {
-                    self.adv();
-                    if self.peek() == Some('>') {
-                        self.adv();
-                        if self.peek() == Some('>') {
-                            self.adv();
-                            if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::UShrAssign); }
-                            else { self.push_tok(&mut t, &mut lines, start, Token::UShr); }
-                        } else if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::ShrAssign); }
-                        else { self.push_tok(&mut t, &mut lines, start, Token::Shr); }
-                    } else if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::Gte); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::Gt); }
-                }
-                '&' => {
-                    self.adv();
-                    if self.peek() == Some('&') {
-                        self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::AndAssign); }
-                        else { self.push_tok(&mut t, &mut lines, start, Token::And); }
-                    }
-                    else if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::BitAndAssign); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::BitAnd); }
-                }
-                '|' => {
-                    self.adv();
-                    if self.peek() == Some('|') {
-                        self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::OrAssign); }
-                        else { self.push_tok(&mut t, &mut lines, start, Token::Or); }
-                    }
-                    else if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::BitOrAssign); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::BitOr); }
-                }
-                '^' => {
-                    self.adv();
-                    if self.peek() == Some('=') { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::BitXorAssign); }
-                    else { self.push_tok(&mut t, &mut lines, start, Token::BitXor); }
-                }
-                '~' => { self.adv(); self.push_tok(&mut t, &mut lines, start, Token::BitNot); }
-                '"' | '\'' => {
-                    self.adv();
-                    let s = self.read_str(ch)?;
-                    self.push_tok(&mut t, &mut lines, start, Token::StringLit(s));
-                }
-                '`' => {
-                    self.adv();
-                    let tpl = self.read_template()?;
-                    self.push_tok(&mut t, &mut lines, start, tpl);
-                }
-                c if c.is_ascii_digit() => {
-                    self.adv();
-                    let num = self.read_num(c)?;
-                    self.push_tok(&mut t, &mut lines, start, num);
-                }
-                c if c.is_alphabetic() || c == '_' || c == '$' => {
-                    self.adv();
-                    let ident = self.read_ident(c);
-                    self.push_tok(&mut t, &mut lines, start, ident);
-                }
-                _ => { self.adv(); }
-            }
-        }
-        Ok(TokenStream { tokens: t, lines })
-    }
-}
-
-struct Parser {
-    tokens: Vec<Token>,
-    lines: Vec<u32>,
-    pos: usize,
-}
-
-impl Parser {
-    fn new(ts: TokenStream) -> Self { Self { tokens: ts.tokens, lines: ts.lines, pos: 0 } }
-    fn peek(&self) -> &Token { self.tokens.get(self.pos).unwrap_or(&Token::Eof) }
-    fn advance(&mut self) -> Token {
-        let t = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
-        self.pos += 1;
-        t
-    }
-
-    fn parse_program(&mut self) -> Result<Vec<Stmt>, CompileError> {
-        let mut s = Vec::new();
-        while !matches!(self.peek(), Token::Eof) { s.push(self.parse_stmt()?); }
-        Ok(s)
-    }
-
-    fn parse_stmt(&mut self) -> Result<Stmt, CompileError> {
-        match self.peek().clone() {
-            Token::Let | Token::Const | Token::Var => self.parse_var_decl(),
-            Token::Function => {
-                self.advance();
-                self.parse_fn_decl(false)
-            }
-            Token::Async => {
-                if matches!(self.tokens.get(self.pos + 1), Some(Token::Function)) {
-                    self.advance(); // async
-                    self.advance(); // function
-                    self.parse_fn_decl(true)
-                } else {
-                    // `async x => ...` / `async () => ...` as an expression.
-                    self.parse_expr_stmt()
-                }
-            }
-            Token::Return => self.parse_return(),
-            Token::If => self.parse_if(),
-            Token::While => self.parse_while(),
-            Token::Do => self.parse_do(),
-            Token::For => self.parse_for(),
-            Token::LBrace => self.parse_block(),
-            Token::Import => self.parse_import(),
-            Token::Break => {
-                self.advance();
-                if let Token::Ident(s) = self.peek().clone() {
-                    self.advance();
-                    if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-                    Ok(Stmt::BreakLabel(s))
-                } else {
-                    if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-                    Ok(Stmt::Break)
-                }
-            }
-            Token::Continue => {
-                self.advance();
-                if let Token::Ident(s) = self.peek().clone() {
-                    self.advance();
-                    if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-                    Ok(Stmt::ContinueLabel(s))
-                } else {
-                    if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-                    Ok(Stmt::Continue)
-                }
-            }
-            // `name: statement` — a labeled statement (loop labels can be
-            // targeted by `break name` / `continue name`).
-            Token::Ident(s) if matches!(self.tokens.get(self.pos + 1), Some(Token::Colon)) => {
-                self.advance(); // ident
-                self.advance(); // colon
-                let body = self.parse_stmt()?;
-                Ok(Stmt::Labeled { name: s, body: Box::new(body) })
-            }
-            Token::Throw => {
-                self.advance();
-                let e = self.parse_expr(0)?;
-                if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-                Ok(Stmt::Throw(e))
-            }
-            Token::Try => self.parse_try(),
-            Token::Switch => self.parse_switch(),
-            Token::Export => self.parse_export(),
-            Token::Class => self.parse_class_decl(),
-            _ => self.parse_expr_stmt(),
-        }
-    }
-
-    /// `export` declarations (module files loaded with `require`):
-    ///   export let a = 1, b = 2;
-    ///   export function f() {}
-    ///   export async function g() {}
-    ///   export { a, b };
-    ///   export { a as c };
-    ///   export default expr;
-    /// Pairs are (public name, source binding); aliases differ in the two.
-    /// The emitter records them in `program.exports`; the declaration itself
-    /// compiles normally.
-    fn parse_export(&mut self) -> Result<Stmt, CompileError> {
-        self.advance(); // export
-        // `export default expr` — stored under the reserved name `\0default`.
-        if matches!(self.peek(), Token::Default) {
-            self.advance();
-            let e = self.parse_expr(0)?;
-            if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-            return Ok(Stmt::Export {
-                pairs: vec![("default".to_string(), DEFAULT_EXPORT.to_string())],
-                stmt: Box::new(Stmt::Expr(e)),
-                default: true,
-            });
-        }
-        // `export { a, b as c }` — re-export existing bindings under names.
-        if matches!(self.peek(), Token::LBrace) {
-            self.advance();
-            let mut pairs = Vec::new();
-            while !matches!(self.peek(), Token::RBrace) {
-                match self.advance() {
-                    Token::Ident(s) => {
-                        let binding = s;
-                        let name = if matches!(self.peek(), Token::As) {
-                            self.advance();
-                            match self.advance() {
-                                Token::Ident(a) => a,
-                                t => {
-                                    return Err(CompileError::UnexpectedToken(format!(
-                                        "{:?}",
-                                        t
-                                    )))
-                                }
-                            }
-                        } else {
-                            binding.clone()
-                        };
-                        pairs.push((name, binding));
-                    }
-                    Token::Comma => {}
-                    Token::Eof => {
-                        return Err(CompileError::UnexpectedToken("RBrace".to_string()))
-                    }
-                    t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                }
-            }
-            if matches!(self.peek(), Token::RBrace) { self.advance(); }
-            if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-            return Ok(Stmt::Export {
-                pairs,
-                stmt: Box::new(Stmt::Nop),
-                default: false,
-            });
-        }
-        // `export <declaration>`: let/const/var, function, async function.
-        let (stmt, names) = match self.peek().clone() {
-            Token::Let | Token::Const | Token::Var => {
-                let s = self.parse_var_decl()?;
-                let names = match &s {
-                    Stmt::VarDecl { decls } => decls
-                        .iter()
-                        .flat_map(|(p, _)| pat_names(p))
-                        .collect::<Vec<_>>(),
-                    _ => Vec::new(),
-                };
-                (s, names)
-            }
-            Token::Function => {
-                self.advance();
-                let s = self.parse_fn_decl(false)?;
-                let names = match &s {
-                    Stmt::FnDecl { name, .. } => vec![name.clone()],
-                    _ => Vec::new(),
-                };
-                (s, names)
-            }
-            Token::Async
-                if matches!(self.tokens.get(self.pos + 1), Some(Token::Function)) =>
-            {
-                self.advance(); // async
-                self.advance(); // function
-                let s = self.parse_fn_decl(true)?;
-                let names = match &s {
-                    Stmt::FnDecl { name, .. } => vec![name.clone()],
-                    _ => Vec::new(),
-                };
-                (s, names)
-            }
-            t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-        };
-        Ok(Stmt::Export {
-            pairs: names.into_iter().map(|n| (n.clone(), n)).collect(),
-            stmt: Box::new(stmt),
-            default: false,
-        })
-    }
-
-    fn parse_var_decl(&mut self) -> Result<Stmt, CompileError> {
-        self.advance();
-        let mut decls = Vec::new();
-        loop {
-            let pat = self.parse_pattern()?;
-            let init = if matches!(self.peek(), Token::Assign) {
-                self.advance();
-                // Initializers are AssignmentExpressions: the comma between
-                // declarators (`let a = 1, b = 2`) stays a separator.
-                Some(self.parse_expr(1)?)
-            } else { None };
-            decls.push((pat, init));
-            if matches!(self.peek(), Token::Comma) {
-                self.advance();
-                continue;
-            }
-            break;
-        }
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        Ok(Stmt::VarDecl { decls })
-    }
-
-    /// Parse a binding target: a plain name, or a destructuring pattern
-    /// `{ a, b: c }` / `[x, , y]` with nested patterns.
-    fn parse_pattern(&mut self) -> Result<Pat, CompileError> {
-        match self.peek().clone() {
-            Token::Ident(s) => {
-                self.advance();
-                Ok(Pat::Bind(s))
-            }
-            Token::LBrace => {
-                self.advance();
-                let mut fields = Vec::new();
-                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                    if matches!(self.peek(), Token::DotDotDot) {
-                        // `...rest` — must be the last element (a trailing
-                        // comma after it is allowed).
-                        self.advance();
-                        let sub = self.parse_pattern()?;
-                        if matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                        }
-                        if !matches!(self.peek(), Token::RBrace) {
-                            return Err(CompileError::UnexpectedToken(
-                                "rest element must be last in object pattern".to_string(),
-                            ));
-                        }
-                        fields.push(ObjPatElem::Rest(sub));
-                        break;
-                    }
-                    if matches!(self.peek(), Token::LBracket) {
-                        // `[expr]: v` — computed key, evaluated at runtime.
-                        self.advance();
-                        let key = self.parse_expr(0)?;
-                        if !matches!(self.peek(), Token::RBracket) {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                        }
-                        self.advance();
-                        if !matches!(self.peek(), Token::Colon) {
-                            return Err(CompileError::UnexpectedToken(
-                                "expected ':' after computed key".to_string(),
-                            ));
-                        }
-                        self.advance();
-                        let sub = self.parse_pattern()?;
-                        fields.push(ObjPatElem::Computed(key, sub));
-                        match self.peek() {
-                            Token::Comma => { self.advance(); }
-                            Token::RBrace => {}
-                            t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                        }
-                        continue;
-                    }
-                    // Constant keys are IdentifierNames: keywords are legal
-                    // (`const { default: d } = o`).
-                    let key = match self.advance() {
-                        Token::StringLit(s) => s,
-                        t => match keyword_text(&t) {
-                            Some(s) => s,
-                            None => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                        },
-                    };
-                    let sub = if matches!(self.peek(), Token::Colon) {
-                        self.advance();
-                        self.parse_pattern()?
-                    } else {
-                        Pat::Bind(key.clone())
-                    };
-                    fields.push(ObjPatElem::Key(key, sub));
-                    match self.peek() {
-                        Token::Comma => { self.advance(); }
-                        Token::RBrace => {}
-                        t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                    }
-                }
-                if !matches!(self.peek(), Token::RBrace) {
-                    return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                }
-                self.advance();
-                Ok(Pat::Object(fields))
-            }
-            Token::LBracket => {
-                self.advance();
-                let mut elems = Vec::new();
-                while !matches!(self.peek(), Token::RBracket | Token::Eof) {
-                    if matches!(self.peek(), Token::Comma) {
-                        elems.push(PatElem::Hole); // skip this element
-                        self.advance();
-                        continue;
-                    }
-                    if matches!(self.peek(), Token::DotDotDot) {
-                        // `...rest` — must be the last element (a trailing
-                        // comma after it is allowed).
-                        self.advance();
-                        let sub = self.parse_pattern()?;
-                        if matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                        }
-                        if !matches!(self.peek(), Token::RBracket) {
-                            return Err(CompileError::UnexpectedToken(
-                                "rest element must be last in array pattern".to_string(),
-                            ));
-                        }
-                        elems.push(PatElem::Rest(sub));
-                        break;
-                    }
-                    elems.push(PatElem::Bind(self.parse_pattern()?));
-                    match self.peek() {
-                        Token::Comma => { self.advance(); }
-                        Token::RBracket => {}
-                        t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                    }
-                }
-                if !matches!(self.peek(), Token::RBracket) {
-                    return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                }
-                self.advance();
-                Ok(Pat::Array(elems))
-            }
-            t => Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-        }
-    }
-
-    /// `import` statements:
-    ///   import { f } from 'alloy:core';          // builtins
-    ///   import { f } from './x.py' as python;    // python sidecar module
-    ///   import { f, g as h } from './x.ajs';     // sugar for require
-    ///   import * as m from './x.ajs';            // whole exports object
-    ///   import d from './x.ajs';                 // default export
-    ///   import './x.ajs';                        // side effects only
-    fn parse_import(&mut self) -> Result<Stmt, CompileError> {
-        self.advance(); // import
-        let kind = if matches!(self.peek(), Token::LBrace) {
-            self.advance();
-            let mut pairs = Vec::new();
-            while !matches!(self.peek(), Token::RBrace) {
-                match self.advance() {
-                    Token::Ident(s) => {
-                        let exported = s;
-                        let local = if matches!(self.peek(), Token::As) {
-                            self.advance();
-                            match self.advance() {
-                                Token::Ident(a) => a,
-                                t => {
-                                    return Err(CompileError::UnexpectedToken(format!(
-                                        "{:?}",
-                                        t
-                                    )))
-                                }
-                            }
-                        } else {
-                            exported.clone()
-                        };
-                        pairs.push((exported, local));
-                    }
-                    Token::Comma => {}
-                    Token::Eof => {
-                        return Err(CompileError::UnexpectedToken("RBrace".to_string()))
-                    }
-                    t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                }
-            }
-            if matches!(self.peek(), Token::RBrace) { self.advance(); }
-            ImportKind::ModuleNamed(pairs)
-        } else if matches!(self.peek(), Token::Star) {
-            self.advance();
-            if matches!(self.peek(), Token::As) { self.advance(); }
-            match self.advance() {
-                Token::Ident(s) => ImportKind::ModuleNamespace(s),
-                t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-            }
-        } else if matches!(self.peek(), Token::Ident(_)) {
-            match self.advance() {
-                Token::Ident(s) => ImportKind::ModuleDefault(s),
-                t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-            }
-        } else {
-            ImportKind::ModuleSideEffect
-        };
-        // `import './x.ajs'` (side effects only) skips the `from` keyword;
-        // every other form is `... from '<src>'`.
-        let src = if matches!(self.peek(), Token::From) {
-            self.advance();
-            match self.advance() {
-                Token::StringLit(s) => s,
-                t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-            }
-        } else {
-            match self.advance() {
-                Token::StringLit(s) => s,
-                t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-            }
-        };
-        // `import { f } from './x.py' as python` — the module-object binding.
-        let py_alias = if matches!(self.peek(), Token::As) {
-            self.advance();
-            match self.advance() {
-                Token::Ident(s) => Some(s),
-                t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-            }
-        } else { None };
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        let kind = if src == "alloy:core" || src == "alloy:fs" {
-            // Builtins: the braced names (or a `* as m` namespace) bind
-            // directly as globals seeded with the native.
-            match kind {
-                ImportKind::ModuleNamed(pairs) => {
-                    ImportKind::Core(pairs.into_iter().map(|(_, l)| l).collect())
-                }
-                ImportKind::ModuleNamespace(n) => ImportKind::Core(vec![n]),
-                _ => return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek()))),
-            }
-        } else if src.ends_with(".py") {
-            ImportKind::Python(py_alias.unwrap_or_else(|| match kind {
-                ImportKind::ModuleNamed(pairs) => {
-                    pairs.first().map(|(_, l)| l.clone()).unwrap_or_default()
-                }
-                _ => String::new(),
-            }))
-        } else {
-            kind
-        };
-        Ok(Stmt::Import { src, kind })
-    }
-
-    /// Parse a function declaration; the `function` keyword (and, if
-    /// `is_async`, the preceding `async`) has already been consumed.
-    fn parse_fn_decl(&mut self, is_async: bool) -> Result<Stmt, CompileError> {
-        let name = match self.advance() {
-            Token::Ident(s) => s,
-            t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-        };
-        let params = self.parse_params()?;
-        let body = self.parse_block()?;
-        Ok(Stmt::FnDecl { name, params, body: Box::new(body), is_async })
-    }
-
-    /// True when the parenthesized group at the current position is followed
-    /// by `=>`, i.e. it is an arrow parameter list rather than a grouping.
-    fn looks_like_arrow_params(&self) -> bool {
-        let mut depth = 0usize;
-        let mut i = self.pos;
-        while let Some(t) = self.tokens.get(i) {
-            match t {
-                Token::LParen => depth += 1,
-                Token::RParen => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return matches!(self.tokens.get(i + 1), Some(Token::Arrow));
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        false
-    }
-
-    /// Arrow body: `=> expr` (implicit return) or `=> { ... }` (block).
-    fn parse_arrow_body(&mut self) -> Result<Box<Stmt>, CompileError> {
-        if matches!(self.peek(), Token::LBrace) {
-            Ok(Box::new(self.parse_block()?))
-        } else {
-            // The implicit-return body is an AssignmentExpression, so a comma
-            // ends it (`x => a, b` is `(x => a), b`, not `x => (a, b)`).
-            let e = self.parse_expr(1)?;
-            Ok(Box::new(Stmt::Return(Some(e))))
-        }
-    }
-
-    fn parse_params(&mut self) -> Result<FnParams, CompileError> {
-        if matches!(self.peek(), Token::LParen) { self.advance(); }
-        let mut params = Vec::new();
-        let mut rest = None;
-        if !matches!(self.peek(), Token::RParen) {
-            loop {
-                if matches!(self.peek(), Token::DotDotDot) {
-                    // `...rest` — the rest parameter must be the last one and
-                    // a plain binding identifier (JS requires this).
-                    self.advance();
-                    let name = match self.advance() {
-                        Token::Ident(s) => s,
-                        t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                    };
-                    if matches!(self.peek(), Token::Comma) {
-                        return Err(CompileError::UnexpectedToken(
-                            "rest parameter must be last".to_string(),
-                        ));
-                    }
-                    params.push(ParamDef { pat: Pat::Bind(name), default: None });
-                    rest = Some(params.len() - 1);
-                    break;
-                }
-                let pat = self.parse_pattern()?;
-                let default = if matches!(self.peek(), Token::Assign) {
-                    self.advance();
-                    Some(self.parse_expr(0)?)
-                } else {
-                    None
-                };
-                params.push(ParamDef { pat, default });
-                if !matches!(self.peek(), Token::Comma) { break; }
-                self.advance();
-            }
-        }
-        if !matches!(self.peek(), Token::RParen) {
-            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-        }
-        self.advance();
-        Ok(FnParams { params, rest })
-    }
-
-    fn parse_return(&mut self) -> Result<Stmt, CompileError> {
-        self.advance();
-        let e = if matches!(self.peek(), Token::Semicolon) || matches!(self.peek(), Token::RBrace) {
-            None
-        } else { Some(self.parse_expr(0)?) };
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        Ok(Stmt::Return(e))
-    }
-
-    fn parse_if(&mut self) -> Result<Stmt, CompileError> {
-        self.advance();
-        let cond = self.parse_paren()?;
-        let then = self.parse_stmt()?;
-        let els = if matches!(self.peek(), Token::Else) {
-            self.advance();
-            Some(Box::new(self.parse_stmt()?))
-        } else { None };
-        Ok(Stmt::If { cond, then: Box::new(then), els })
-    }
-
-    /// Parse a parenthesized expression. Used for grouping `(a + b)` and for
-    /// `if`/`while`/`switch` conditions, where the parens are optional in this
-    /// engine (`if x > 0 { }` parses like Node's `if (x > 0) { }`). The closer
-    /// is only required when an opener was actually consumed, so a parenless
-    /// condition followed by `{` still parses.
-    fn parse_paren(&mut self) -> Result<Expr, CompileError> {
-        let had_paren = matches!(self.peek(), Token::LParen);
-        if had_paren { self.advance(); }
-        let e = self.parse_expr(0)?;
-        if had_paren {
-            if !matches!(self.peek(), Token::RParen) {
-                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-            }
-            self.advance();
-        }
-        Ok(e)
-    }
-
-    fn parse_while(&mut self) -> Result<Stmt, CompileError> {
-        self.advance();
-        let cond = self.parse_paren()?;
-        let body = self.parse_stmt()?;
-        Ok(Stmt::While { cond, body: Box::new(body) })
-    }
-
-    fn parse_do(&mut self) -> Result<Stmt, CompileError> {
-        self.advance(); // do
-        let body = self.parse_stmt()?;
-        if !matches!(self.peek(), Token::While) {
-            return Err(CompileError::UnexpectedToken(
-                "expected 'while' after do body".to_string(),
-            ));
-        }
-        self.advance(); // while
-        let cond = self.parse_paren()?;
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        Ok(Stmt::DoWhile { cond, body: Box::new(body) })
-    }
-
-    fn parse_for(&mut self) -> Result<Stmt, CompileError> {
-        self.advance();
-        if matches!(self.peek(), Token::LParen) { self.advance(); }
-
-        // Detect `for (let x of ...)`, `for (let [a, b] of ...)`,
-        // `for ({ a, b } in ...)` headers before falling back to the C-style
-        // form. The pattern is parsed optimistically and rolled back if it is
-        // not followed by `of`/`in`.
-        let saved = self.pos;
-        let mut declared = false;
-        if matches!(self.peek(), Token::Let | Token::Const | Token::Var) {
-            declared = true;
-            self.advance();
-        }
-        let pat = match self.parse_pattern() {
-            Ok(p) => p,
-            Err(_) => {
-                self.pos = saved;
-                Pat::Bind(String::new())
-            }
-        };
-        if matches!(self.peek(), Token::Of | Token::In) {
-            let is_in = matches!(self.peek(), Token::In);
-            self.advance();
-            // The iterable is an AssignmentExpression: `for (x of a, b)` is a
-            // SyntaxError (the comma is neither an operator nor a separator
-            // here), so parse at min_bp 1 and let the trailing comma fail.
-            let source = self.parse_expr(1)?;
-            if matches!(self.peek(), Token::RParen) { self.advance(); }
-            let body = self.parse_stmt()?;
-            if is_in {
-                return Ok(Stmt::ForIn { pat, declared, obj: source, body: Box::new(body) });
-            } else {
-                return Ok(Stmt::ForOf { pat, declared, iterable: source, body: Box::new(body) });
-            }
-        }
-        self.pos = saved;
-
-        let init = if matches!(self.peek(), Token::Semicolon) {
-            self.advance(); None
-        } else if matches!(self.peek(), Token::Let) || matches!(self.peek(), Token::Const) {
-            Some(Box::new(self.parse_var_decl()?))
-        } else {
-            Some(Box::new(self.parse_expr_stmt()?))
-        };
-        let cond = if matches!(self.peek(), Token::Semicolon) { None }
-        else { Some(self.parse_expr(0)?) };
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        let update = if matches!(self.peek(), Token::RParen) { None }
-        else { Some(self.parse_expr(0)?) };
-        if matches!(self.peek(), Token::RParen) { self.advance(); }
-        let body = self.parse_stmt()?;
-        Ok(Stmt::For { init, cond, update, body: Box::new(body) })
-    }
-
-    fn parse_try(&mut self) -> Result<Stmt, CompileError> {
-        self.advance(); // try
-        let body = self.parse_block()?;
-        let mut catch = None;
-        let mut finally = None;
-        if matches!(self.peek(), Token::Catch) {
-            self.advance();
-            let name = if matches!(self.peek(), Token::LParen) {
-                self.advance();
-                match self.advance() {
-                    Token::Ident(s) => s,
-                    t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                }
-            } else {
-                String::new()
-            };
-            if matches!(self.peek(), Token::RParen) { self.advance(); }
-            let block = self.parse_block()?;
-            catch = Some((name, Box::new(block)));
-        }
-        if matches!(self.peek(), Token::Finally) {
-            self.advance();
-            let block = self.parse_block()?;
-            finally = Some(Box::new(block));
-        }
-        if catch.is_none() && finally.is_none() {
-            return Err(CompileError::UnexpectedToken("try without catch or finally".to_string()));
-        }
-        Ok(Stmt::Try { body: Box::new(body), catch, finally })
-    }
-
-    fn parse_switch(&mut self) -> Result<Stmt, CompileError> {
-        self.advance(); // switch
-        let disc = self.parse_paren()?;
-        if matches!(self.peek(), Token::LBrace) { self.advance(); }
-        let mut cases = Vec::new();
-        loop {
-            match self.peek().clone() {
-                Token::Case => {
-                    self.advance();
-                    let test = self.parse_expr(0)?;
-                    if matches!(self.peek(), Token::Colon) { self.advance(); }
-                    let mut body = Vec::new();
-                    while !matches!(self.peek(), Token::Case | Token::Default | Token::RBrace | Token::Eof) {
-                        body.push(self.parse_stmt()?);
-                    }
-                    cases.push(SwitchCase { test: Some(test), body });
-                }
-                Token::Default => {
-                    self.advance();
-                    if matches!(self.peek(), Token::Colon) { self.advance(); }
-                    let mut body = Vec::new();
-                    while !matches!(self.peek(), Token::Case | Token::Default | Token::RBrace | Token::Eof) {
-                        body.push(self.parse_stmt()?);
-                    }
-                    cases.push(SwitchCase { test: None, body });
-                }
-                Token::RBrace => {
-                    self.advance();
-                    break;
-                }
-                Token::Eof => break,
-                t => {
-                    return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
-                }
-            }
-        }
-        Ok(Stmt::Switch { disc, cases })
-    }
-
-    /// `class Name extends Parent { … }` — a declaration (name required).
-    fn parse_class_decl(&mut self) -> Result<Stmt, CompileError> {
-        self.advance(); // class
-        let name = match self.advance() {
-            Token::Ident(s) => s,
-            t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-        };
-        let extends = if matches!(self.peek(), Token::Extends) {
-            self.advance();
-            Some(self.parse_expr(1)?)
-        } else {
-            None
-        };
-        let methods = self.parse_class_body()?;
-        Ok(Stmt::Class { name, extends, methods })
-    }
-
-    /// `class [Name] extends Parent { … }` — a class expression.
-    fn parse_class_expr(&mut self) -> Result<Expr, CompileError> {
-        self.advance(); // class
-        let name = match self.peek() {
-            Token::Ident(s) => {
-                let s = s.clone();
-                self.advance();
-                Some(s)
-            }
-            _ => None,
-        };
-        let extends = if matches!(self.peek(), Token::Extends) {
-            self.advance();
-            Some(Box::new(self.parse_expr(1)?))
-        } else {
-            None
-        };
-        let methods = self.parse_class_body()?;
-        Ok(Expr::Class { name, extends, methods })
-    }
-
-    /// `{ [static] [async] name(params) { body } … }` — the class body. The
-    /// constructor is the method named `constructor`.
-    fn parse_class_body(&mut self) -> Result<Vec<MethodDef>, CompileError> {
-        if matches!(self.peek(), Token::LBrace) { self.advance(); }
-        let mut methods = Vec::new();
-        while !matches!(self.peek(), Token::RBrace) && !matches!(self.peek(), Token::Eof) {
-            let mut is_static = false;
-            if matches!(self.peek(), Token::Static) {
-                self.advance();
-                is_static = true;
-            }
-            let mut is_async = false;
-            if matches!(self.peek(), Token::Async)
-                && matches!(self.tokens.get(self.pos + 1), Some(Token::Ident(_)))
-            {
-                self.advance();
-                is_async = true;
-            }
-            // Method names are IdentifierNames: any keyword is legal
-            // (`constructor`, `get`, `default`…).
-            let name = match self.advance() {
-                Token::Ident(s) => s,
-                Token::StringLit(s) => s,
-                t => match keyword_text(&t) {
-                    Some(s) => s,
-                    None => {
-                        return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
-                    }
-                },
-            };
-            if !matches!(self.peek(), Token::LParen) {
-                return Err(CompileError::UnexpectedToken(
-                    "expected '(' after method name (getters/setters/fields not supported)".to_string(),
-                ));
-            }
-            self.advance(); // (
-            let params = self.parse_params()?;
-            let body = Box::new(self.parse_block()?);
-            methods.push(MethodDef { name, is_static, is_async, kind: MethodKind::Normal, params, body, init: None });
-            if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        }
-        if !matches!(self.peek(), Token::RBrace) {
-            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-        }
-        self.advance();
-        Ok(methods)
-    }
-
-    /// `new C(args)` / `new C.m(args)`: parse the callee as a member chain
-    /// (no call parens — those are the constructor arguments) plus optional
-    /// argument list. `new C` with no parens means `new C()`.
-    fn parse_new_expr(&mut self) -> Result<Expr, CompileError> {
-        self.advance(); // new
-        let mut callee = match self.peek().clone() {
-            Token::Ident(s) => {
-                self.advance();
-                Expr::Ident(s)
-            }
-            Token::This => {
-                self.advance();
-                Expr::Ident("this".into())
-            }
-            Token::LParen => {
-                // `new (factory())()` — parenthesized constructor expression.
-                let e = self.parse_paren()?;
-                e
-            }
-            Token::LBracket | Token::Function | Token::Async => self.parse_expr(14)?,
-            t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-        };
-        // Member chain: `.prop` / `[idx]` (no call parens yet).
-        loop {
-            match self.peek() {
-                Token::Dot => {
-                    self.advance();
-                    let prop = match self.advance() {
-                        t => match keyword_text(&t) {
-                            Some(s) => s,
-                            None => {
-                                return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
-                            }
-                        },
-                    };
-                    callee = Expr::Prop { obj: Box::new(callee), prop, optional: false };
-                }
-                Token::LBracket => {
-                    self.advance();
-                    let idx = self.parse_expr(0)?;
-                    if !matches!(self.peek(), Token::RBracket) {
-                        return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                    }
-                    self.advance();
-                    callee = Expr::Index { obj: Box::new(callee), index: Box::new(idx), optional: false };
-                }
-                _ => break,
-            }
-        }
-        let mut args = Vec::new();
-        if matches!(self.peek(), Token::LParen) {
-            self.advance();
-            while !matches!(self.peek(), Token::RParen) {
-                let spread = matches!(self.peek(), Token::DotDotDot);
-                if spread { self.advance(); }
-                args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
-                match self.peek() {
-                    Token::Comma => { self.advance(); }
-                    Token::RParen => {}
-                    t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                }
-            }
-            if !matches!(self.peek(), Token::RParen) {
-                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-            }
-            self.advance();
-        }
-        Ok(Expr::New { callee: Box::new(callee), args })
-    }
-
-    fn parse_block(&mut self) -> Result<Stmt, CompileError> {
-        if matches!(self.peek(), Token::LBrace) { self.advance(); }
-        let mut s = Vec::new();
-        while !matches!(self.peek(), Token::RBrace) && !matches!(self.peek(), Token::Eof) {
-            s.push(self.parse_stmt()?);
-        }
-        if !matches!(self.peek(), Token::RBrace) {
-            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-        }
-        self.advance();
-        Ok(Stmt::Block(s))
-    }
-
-    fn parse_expr_stmt(&mut self) -> Result<Stmt, CompileError> {
-        let e = self.parse_expr(0)?;
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        Ok(Stmt::Expr(e))
-    }
-
-    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, CompileError> {
-        // Fresh expression boundary: parens, statement contexts, list
-        // elements, and operand parses all reset the `??`/`&&`/`||` mixing
-        // family. Only the binary-op RHS recursion (below) threads it.
-        self.parse_expr_inner(min_bp, None)
-    }
-
-    /// `family` is the nullish/logical family already in use at this parse
-    /// level: `Some("nullish")` after `??`, `Some("logical")` after
-    /// `&&`/`||`. JS forbids mixing the two in one unparenthesized
-    /// expression (`a ?? b || c` and `a && b ?? c` are SyntaxErrors), so an
-    /// op whose family differs from the incoming one is rejected.
-    fn parse_expr_inner(
-        &mut self,
-        min_bp: u8,
-        mut family: Option<&'static str>,
-    ) -> Result<Expr, CompileError> {
-        let mut lhs = match self.peek().clone() {
-            Token::Number(n) => { self.advance(); Expr::Num(n) }
-            Token::Int(i) => { self.advance(); Expr::Int(i) }
-            Token::StringLit(s) => { self.advance(); Expr::Str(s) }
-            Token::True => { self.advance(); Expr::Bool(true) }
-            Token::False => { self.advance(); Expr::Bool(false) }
-            Token::Null => { self.advance(); Expr::Null }
-            Token::Undefined => { self.advance(); Expr::Undef }
-            Token::Regex { pattern, flags } => {
-                self.advance();
-                Expr::Regex { pattern, flags }
-            }
-            Token::Ident(s) => { self.advance(); Expr::Ident(s) }
-            Token::Minus => {
-                self.advance();
-                Expr::Unary("-", Box::new(self.parse_expr(15)?))
-            }
-            Token::Not => {
-                self.advance();
-                Expr::Unary("!", Box::new(self.parse_expr(15)?))
-            }
-            Token::PlusPlus => {
-                self.advance();
-                Expr::IncDec { target: Box::new(self.parse_expr(15)?), is_inc: true, is_prefix: true }
-            }
-            Token::MinusMinus => {
-                self.advance();
-                Expr::IncDec { target: Box::new(self.parse_expr(15)?), is_inc: false, is_prefix: true }
-            }
-            Token::Typeof => {
-                self.advance();
-                Expr::Unary("typeof", Box::new(self.parse_expr(15)?))
-            }
-            Token::Void => {
-                self.advance();
-                Expr::Unary("void", Box::new(self.parse_expr(15)?))
-            }
-            Token::Delete => {
-                self.advance();
-                Expr::Delete(Box::new(self.parse_expr(15)?))
-            }
-            Token::BitNot => {
-                self.advance();
-                Expr::Unary("~", Box::new(self.parse_expr(15)?))
-            }
-            Token::Await => {
-                self.advance();
-                Expr::Await(Box::new(self.parse_expr(15)?))
-            }
-            Token::This => {
-                self.advance();
-                Expr::Ident("this".into())
-            }
-            Token::New => {
-                let e = self.parse_new_expr()?;
-                e
-            }
-            Token::Super => {
-                self.advance();
-                match self.peek() {
-                    Token::Dot => {
-                        self.advance();
-                        let prop = match self.advance() {
-                            t => match keyword_text(&t) {
-                                Some(s) => s,
-                                None => {
-                                    return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
-                                }
-                            },
-                        };
-                        let args = if matches!(self.peek(), Token::LParen) {
-                            self.advance();
-                            let mut args = Vec::new();
-                            while !matches!(self.peek(), Token::RParen) {
-                                let spread = matches!(self.peek(), Token::DotDotDot);
-                                if spread { self.advance(); }
-                                args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
-                                match self.peek() {
-                                    Token::Comma => { self.advance(); }
-                                    Token::RParen => {}
-                                    t => {
-                                        return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
-                                    }
-                                }
-                            }
-                            if !matches!(self.peek(), Token::RParen) {
-                                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                            }
-                            self.advance();
-                            Some(args)
-                        } else {
-                            None
-                        };
-                        Expr::SuperProp { prop, args }
-                    }
-                    Token::LParen => {
-                        self.advance();
-                        let mut args = Vec::new();
-                        while !matches!(self.peek(), Token::RParen) {
-                            let spread = matches!(self.peek(), Token::DotDotDot);
-                            if spread { self.advance(); }
-                            args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
-                            match self.peek() {
-                                Token::Comma => { self.advance(); }
-                                Token::RParen => {}
-                                t => {
-                                    return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
-                                }
-                            }
-                        }
-                        if !matches!(self.peek(), Token::RParen) {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                        }
-                        self.advance();
-                        Expr::SuperCall { args }
-                    }
-                    _ => {
-                        return Err(CompileError::UnexpectedToken(
-                            "super must be followed by '(' or '.m('".to_string(),
-                        ));
-                    }
-                }
-            }
-            Token::Class => {
-                let e = self.parse_class_expr()?;
-                e
-            }
-            Token::Async => {
-                self.advance();
-                if matches!(self.peek(), Token::Function) {
-                    self.advance();
-                    let p = self.parse_params()?;
-                    let b = self.parse_block()?;
-                    Expr::Lambda { params: p, body: Box::new(b), is_async: true, is_arrow: false }
-                } else if matches!(self.peek(), Token::LParen) && self.looks_like_arrow_params() {
-                    self.advance(); // (
-                    let params = self.parse_params()?;
-                    self.advance(); // =>
-                    let body = self.parse_arrow_body()?;
-                    Expr::Lambda { params, body, is_async: true, is_arrow: true }
-                } else if matches!(self.peek(), Token::Ident(_)) {
-                    // `async x => body`
-                    let name = match self.advance() {
-                        Token::Ident(s) => s,
-                        _ => unreachable!(),
-                    };
-                    if matches!(self.peek(), Token::Arrow) { self.advance(); }
-                    let body = self.parse_arrow_body()?;
-                    Expr::Lambda {
-                        params: FnParams { params: vec![ParamDef { pat: Pat::Bind(name), default: None }], rest: None },
-                        body,
-                        is_async: true,
-                        is_arrow: true,
-                    }
-                } else {
-                    return Err(CompileError::UnexpectedToken("async without function/arrow".to_string()));
-                }
-            }
-            Token::LParen => {
-                if self.looks_like_arrow_params() {
-                    self.advance(); // (
-                    let params = self.parse_params()?;
-                    self.advance(); // =>
-                    let body = self.parse_arrow_body()?;
-                    Expr::Lambda { params, body, is_async: false, is_arrow: true }
-                } else {
-                    self.advance();
-                    let e = self.parse_expr(0)?;
-                    if !matches!(self.peek(), Token::RParen) {
-                        return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                    }
-                    self.advance();
-                    Expr::Paren(Box::new(e))
-                }
-            }
-            Token::TemplateLit(parts) => {
-                self.advance();
-                Expr::Template(parts)
-            }
-            Token::LBracket => {
-                self.advance();
-                let mut el = Vec::new();
-                while !matches!(self.peek(), Token::RBracket) {
-                    if matches!(self.peek(), Token::Comma) {
-                        // Elision `[a, , b]`: an empty slot that evaluates to
-                        // undefined (and maps to a hole in assignment targets).
-                        el.push(Elem { spread: false, hole: true, expr: Expr::Undef });
-                        self.advance();
-                        continue;
-                    }
-                    let spread = matches!(self.peek(), Token::DotDotDot);
-                    if spread { self.advance(); }
-                    // Elements are AssignmentExpressions; the comma is the
-                    // list separator, not the operator.
-                    el.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
-                    // Commas are REQUIRED between elements (`[1 2]` is a
-                    // SyntaxError in JS, not `[1, 2]`).
-                    match self.peek() {
-                        Token::Comma => { self.advance(); }
-                        Token::RBracket => {}
-                        t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                    }
-                }
-                if !matches!(self.peek(), Token::RBracket) {
-                    return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                }
-                self.advance();
-                Expr::Array(el)
-            }
-            Token::Function => {
-                self.advance();
-                let p = self.parse_params()?;
-                let b = self.parse_block()?;
-                Expr::Lambda { params: p, body: Box::new(b), is_async: false, is_arrow: false }
-            }
-            Token::LBrace => {
-                self.advance();
-                let mut fields = Vec::new();
-                while !matches!(self.peek(), Token::RBrace) {
-                    match self.peek().clone() {
-                        // `{ ...expr }`: copy the source's own enumerable
-                        // properties, in order. `{...null}` is a no-op.
-                        Token::DotDotDot => {
-                            self.advance();
-                            let e = self.parse_expr(1)?;
-                            fields.push(ObjElem::Spread(e));
-                        }
-                        // `{ [expr]: value }`: the key is evaluated at
-                        // runtime and coerced to a string.
-                        Token::LBracket => {
-                            self.advance();
-                            let k = self.parse_expr(0)?;
-                            if !matches!(self.peek(), Token::RBracket) {
-                                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                            }
-                            self.advance();
-                            if !matches!(self.peek(), Token::Colon) {
-                                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                            }
-                            self.advance();
-                            let v = self.parse_expr(1)?;
-                            fields.push(ObjElem::Computed(k, v));
-                        }
-                        // `{ async f() {} }` — async method shorthand.
-                        Token::Async
-                            if matches!(self.tokens.get(self.pos + 1), Some(Token::Ident(_)))
-                                && matches!(self.tokens.get(self.pos + 2), Some(Token::LParen)) =>
-                        {
-                            self.advance(); // async
-                            let name = match self.advance() {
-                                Token::Ident(s) => s,
-                                _ => unreachable!(),
-                            };
-                            let params = self.parse_params()?;
-                            let b = self.parse_block()?;
-                            fields.push(ObjElem::Pair(
-                                name,
-                                Expr::Lambda {
-                                    params,
-                                    body: Box::new(b),
-                                    is_async: true,
-                                    is_arrow: false,
-                                },
-                            ));
-                        }
-                        _ => {
-                            // Keys are IdentifierNames: any keyword is legal
-                            // (`{ default: 1, if: 2 }`), plus string keys.
-                            let key = match self.advance() {
-                                Token::StringLit(s) => s,
-                                t => match keyword_text(&t) {
-                                    Some(s) => s,
-                                    None => {
-                                        return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
-                                    }
-                                },
-                            };
-                            if matches!(self.peek(), Token::LParen) {
-                                // Method shorthand `{ f(a) { ... } }`: a
-                                // non-arrow lambda, so `this` binds via the
-                                // receiver when called as `o.f()`.
-                                self.advance();
-                                let params = self.parse_params()?;
-                                let b = self.parse_block()?;
-                                fields.push(ObjElem::Pair(
-                                    key,
-                                    Expr::Lambda {
-                                        params,
-                                        body: Box::new(b),
-                                        is_async: false,
-                                        is_arrow: false,
-                                    },
-                                ));
-                            } else if matches!(self.peek(), Token::Colon) {
-                                self.advance();
-                                // Property values are AssignmentExpressions;
-                                // the comma is the field separator — and it
-                                // is REQUIRED between fields (`{a: 1 b: 2}`
-                                // is a SyntaxError in JS).
-                                let value = self.parse_expr(1)?;
-                                fields.push(ObjElem::Pair(key, value));
-                            } else {
-                                // Shorthand `{ a }` — the value is the
-                                // identifier itself. This is the only legal
-                                // no-colon form; `{ a.b }` errors (shorthand
-                                // must be an IdentifierReference in JS).
-                                fields.push(ObjElem::Pair(key.clone(), Expr::Ident(key)));
-                            }
-                        }
-                    }
-                    match self.peek() {
-                        Token::Comma => { self.advance(); }
-                        Token::RBrace => {}
-                        t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                    }
-                }
-                if !matches!(self.peek(), Token::RBrace) {
-                    return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                }
-                self.advance();
-                Expr::Object(fields)
-            }
-            t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-        };
-
-        loop {
-            if matches!(self.peek(), Token::LParen) {
-                self.advance();
-                let mut args = Vec::new();
-                while !matches!(self.peek(), Token::RParen) {
-                    let spread = matches!(self.peek(), Token::DotDotDot);
-                    if spread { self.advance(); }
-                    // Arguments are AssignmentExpressions; the comma is the
-                    // list separator, not the operator.
-                    args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
-                    // Commas are REQUIRED between arguments — `f(a b)` is a
-                    // SyntaxError in JS, and a missing comma is how `0.0
-                    // toString()` used to silently become two arguments.
-                    match self.peek() {
-                        Token::Comma => { self.advance(); }
-                        Token::RParen => {}
-                        t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                    }
-                }
-                if !matches!(self.peek(), Token::RParen) {
-                    return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                }
-                self.advance();
-                lhs = Expr::Call { callee: Box::new(lhs), args, optional: false };
-                continue;
-            } else if matches!(self.peek(), Token::Dot) {
-                self.advance();
-                // Reserved words are legal property names after a dot
-                // (`m.default`, `o.delete`, `o.if` — the IdentifierName
-                // rule). Any keyword token is mapped back to its text.
-                let prop = match self.advance() {
-                    t => match keyword_text(&t) {
-                        Some(s) => s,
-                        None => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
-                    },
-                };
-                lhs = Expr::Prop { obj: Box::new(lhs), prop, optional: false };
-                continue;
-            } else if matches!(self.peek(), Token::QuestionDot) {
-                // Optional chaining: `o?.p`, `o?.[k]`, `f?.()`. The `?.` must
-                // be followed by a property name, `[`, or `(` (the lexer
-                // already reclassifies `?.5` as a ternary). Each link records
-                // its optionality; the emitter short-circuits the whole
-                // remaining chain when the link's receiver is nullish.
-                self.advance(); // ?.
-                match self.peek() {
-                    Token::LBracket => {
-                        self.advance();
-                        let idx = self.parse_expr(0)?;
-                        if !matches!(self.peek(), Token::RBracket) {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                        }
-                        self.advance();
-                        lhs = Expr::Index {
-                            obj: Box::new(lhs),
-                            index: Box::new(idx),
-                            optional: true,
-                        };
-                    }
-                    Token::LParen => {
-                        self.advance();
-                        let mut args = Vec::new();
-                        while !matches!(self.peek(), Token::RParen) {
-                            let spread = matches!(self.peek(), Token::DotDotDot);
-                            if spread {
-                                self.advance();
-                            }
-                            args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
-                            match self.peek() {
-                                Token::Comma => {
-                                    self.advance();
-                                }
-                                Token::RParen => {}
-                                t => {
-                                    return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
-                                }
-                            }
-                        }
-                        if !matches!(self.peek(), Token::RParen) {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                        }
-                        self.advance();
-                        lhs = Expr::Call {
-                            callee: Box::new(lhs),
-                            args,
-                            optional: true,
-                        };
-                    }
-                    // `?.prop` / `?.keyword` (reserved words are legal
-                    // property names after `?.`, same as after `.`).
-                    t => match keyword_text(&t) {
-                        Some(s) => {
-                            self.advance();
-                            lhs = Expr::Prop {
-                                obj: Box::new(lhs),
-                                prop: s,
-                                optional: true,
-                            };
-                        }
-                        None => {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                        }
-                    },
-                }
-                continue;
-            } else if matches!(self.peek(), Token::LBracket) {
-                self.advance();
-                let idx = self.parse_expr(0)?;
-                if !matches!(self.peek(), Token::RBracket) {
-                    return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                }
-                self.advance();
-                lhs = Expr::Index { obj: Box::new(lhs), index: Box::new(idx), optional: false };
-                continue;
-            } else if matches!(self.peek(), Token::Arrow) && matches!(&lhs, Expr::Ident(_)) {
-                // Single-parameter arrow shorthand: `x => body`.
-                let name = match &lhs {
-                    Expr::Ident(s) => s.clone(),
-                    _ => unreachable!(),
-                };
-                self.advance(); // =>
-                let body = self.parse_arrow_body()?;
-                lhs = Expr::Lambda {
-                    params: FnParams { params: vec![ParamDef { pat: Pat::Bind(name), default: None }], rest: None },
-                    body,
-                    is_async: false,
-                    is_arrow: true,
-                };
-                continue;
-            } else if matches!(self.peek(), Token::PlusPlus | Token::MinusMinus) {
-                // Postfix `x++` / `x--`; binds tighter than any binary op.
-                let is_inc = matches!(self.peek(), Token::PlusPlus);
-                self.advance();
-                lhs = Expr::IncDec { target: Box::new(lhs), is_inc, is_prefix: false };
-                continue;
-            }
-            let (op, bp): (&str, u8) = match self.peek() {
-                Token::Plus => ("+", 10),
-                Token::Minus => ("-", 10),
-                Token::Star => ("*", 11),
-                Token::Slash => ("/", 11),
-                Token::Percent => ("%", 11),
-                Token::StarStar => {
-                    // `**` binds tighter than `*`/`/`/`%` and is
-                    // right-associative. JS restricts the LEFT operand to a
-                    // non-unary expression (`-2 ** 2` is a SyntaxError; the
-                    // exponent itself may be unary: `2 ** -2` is fine).
-                    if matches!(lhs, Expr::Unary(..)) {
-                        return Err(CompileError::UnexpectedToken(
-                            "unary expression cannot be the left operand of '**'".to_string(),
-                        ));
-                    }
-                    ("**", 12)
-                }
-                Token::EqEq => ("==", 7),
-                Token::Neq => ("!=", 7),
-                Token::EqEqEq => ("===", 7),
-                Token::NeqEq => ("!==", 7),
-                Token::Lt => ("<", 8),
-                Token::Gt => (">", 8),
-                Token::Lte => ("<=", 8),
-                Token::Gte => (">=", 8),
-                // `instanceof` and the `in` operator bind at relational
-                // precedence (JS spec).
-                Token::InstanceOf => ("instanceof", 8),
-                Token::In => ("in", 8),
-                // Shifts bind between relational and additive: `a << b + c`
-                // is `a << (b + c)`, `a < b << c` is `a < (b << c)`.
-                Token::Shl => ("<<", 9),
-                Token::Shr => (">>", 9),
-                Token::UShr => (">>>", 9),
-                Token::And => ("&&", 3),
-                Token::Or => ("||", 2),
-                Token::QuestionQuestion => ("??", 2),
-                // Bitwise ops bind between the logical ops and equality,
-                // matching JS precedence: `||` < `&&` < `|` < `^` < `&` < eq.
-                Token::BitOr => ("|", 4),
-                Token::BitXor => ("^", 5),
-                Token::BitAnd => ("&", 6),
-                Token::Assign => ("=", 1),
-                Token::PlusAssign => ("+=", 1),
-                Token::MinusAssign => ("-=", 1),
-                Token::StarAssign => ("*=", 1),
-                Token::SlashAssign => ("/=", 1),
-                Token::PercentAssign => ("%=", 1),
-                Token::BitAndAssign => ("&=", 1),
-                Token::BitOrAssign => ("|=", 1),
-                Token::BitXorAssign => ("^=", 1),
-                Token::ShlAssign => ("<<=", 1),
-                Token::ShrAssign => (">>=", 1),
-                Token::UShrAssign => (">>>=", 1),
-                Token::StarStarAssign => ("**=", 1),
-                Token::AndAssign => ("&&=", 1),
-                Token::OrAssign => ("||=", 1),
-                Token::NullishAssign => ("??=", 1),
-                // No binary operator here. Two expressions directly adjacent
-                // (no operator, no postfix) is invalid JS (`0.toString` is a
-                // SyntaxError in Node because `0.` lexes as a number and the
-                // identifier follows it; `a b` and `a 5` are errors too).
-                // This used to silently misparse — the dangling identifier
-                // became a second call argument or a second statement.
-                // Only a SAME-LINE adjacency is an error. The engine treats a
-                // newline as an implicit statement separator (tests/REPL rely
-                // on `const f = x => x` \n `print(f())` with no semicolon).
-                t if starts_expression(t)
-                    && self.pos > 0
-                    && self.lines[self.pos] == self.lines[self.pos - 1] =>
-                {
-                    return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-                }
-                _ => break,
-            };
-            if bp < min_bp { break; }
-            // `??` cannot be mixed with `&&`/`||` in one unparenthesized
-            // expression (JS SyntaxError). The family of the incoming parse
-            // level flows down through the RHS recursion, so the check fires
-            // regardless of nesting order (`a ?? b && c`, `a && b ?? c`,
-            // `a ?? b || c`); parens reset it via the parse_expr wrapper.
-            let fam = match op {
-                "??" => Some("nullish"),
-                "&&" | "||" => Some("logical"),
-                _ => None,
-            };
-            let next_family = match (family, fam) {
-                (Some(a), Some(b)) if a != b => {
-                    return Err(CompileError::UnexpectedToken(
-                        "mix of '??' with '&&' or '||' requires parentheses".to_string(),
-                    ));
-                }
-                (_, Some(b)) => Some(b),
-                (f, None) => f,
-            };
-            self.advance();
-            // Assignment operators and `**` are right-associative: their RHS
-            // parses at the same precedence, so `a = b = c` chains into
-            // `a = (b = c)` and `2 ** 3 ** 2` into `2 ** (3 ** 2)`.
-            let is_assign = op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/="
-                || op == "%=" || op == "&=" || op == "|=" || op == "^=" || op == "<<="
-                || op == ">>=" || op == ">>>=" || op == "**=" || op == "&&=" || op == "||="
-                || op == "??=";
-            let right_assoc = is_assign || op == "**";
-            let rhs = self.parse_expr_inner(if right_assoc { bp } else { bp + 1 }, next_family)?;
-            lhs = if is_assign {
-                Expr::Assign { target: Box::new(lhs), op, value: Box::new(rhs) }
-            } else {
-                Expr::Bin(op, Box::new(lhs), Box::new(rhs))
-            };
-            // The family persists across the loop's remaining iterations, so
-            // a later same-precedence op sees it: `a ?? b || c` (both bp 2,
-            // left-assoc) must still hit the mixing rule even though the RHS
-            // recursion stopped before the `||`.
-            family = next_family;
-            continue;
-        }
-
-        // Ternary `cond ? then : else`. Binds looser than `||` (so it is not
-        // consumed as the RHS of `||`, min_bp 3) but tighter than assignment
-        // (so `x = a ? b : c` takes the whole ternary as the RHS, min_bp 2).
-        // The branches are AssignmentExpressions (JS grammar), so they parse
-        // at min_bp 1 — assignments allowed, the comma operator is not (it
-        // needs parens): `a ? b : c, d` is `(a ? b : c), d`.
-        if matches!(self.peek(), Token::Question) {
-            if 2 < min_bp {
-                return Ok(lhs);
-            }
-            self.advance(); // ?
-            let then_branch = self.parse_expr(1)?;
-            if !matches!(self.peek(), Token::Colon) {
-                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
-            }
-            self.advance(); // :
-            let else_branch = self.parse_expr(1)?;
-            lhs = Expr::Ternary {
-                cond: Box::new(lhs),
-                then: Box::new(then_branch),
-                els: Box::new(else_branch),
-            };
-        }
-
-        // Comma operator: the lowest-precedence expression. Only a "full
-        // expression" context (min_bp == 0 — parens, statements, return,
-        // conditions, for-init/update, template holes, switch tests) sees it;
-        // separator contexts parse at min_bp >= 1 so `f(a, b)` / `[a, b]` /
-        // `let x = 1, y = 2` keep their commas as separators. Each element is
-        // itself a full expression minus the comma (min_bp 1, so assignments
-        // and ternaries are allowed inside).
-        if min_bp == 0 && matches!(self.peek(), Token::Comma) {
-            let mut seq = vec![lhs];
-            while matches!(self.peek(), Token::Comma) {
-                self.advance();
-                seq.push(self.parse_expr(1)?);
-            }
-            lhs = Expr::Sequence(seq);
-        }
-        Ok(lhs)
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Expr {
-    Num(f64),
-    Int(i64),
-    Str(String),
-    Bool(bool),
-    Null,
-    Undef,
-    Ident(String),
-    Bin(&'static str, Box<Expr>, Box<Expr>),
-    Unary(&'static str, Box<Expr>),
-    /// `delete target`: member expressions delete the property/index, a plain
-    /// identifier evaluates to false, anything else evaluates and yields true.
-    Delete(Box<Expr>),
-    Assign { target: Box<Expr>, op: &'static str, value: Box<Expr> },
-    /// A call. `optional` is true when written `f?.()` — the args are not
-    /// evaluated and the whole chain yields undefined when the callee is
-    /// nullish.
-    Call { callee: Box<Expr>, args: Vec<Elem>, optional: bool },
-    /// A property read. `optional` is true when written `o?.p`.
-    Prop { obj: Box<Expr>, prop: String, optional: bool },
-    /// An index read. `optional` is true when written `o?.[k]`.
-    Index { obj: Box<Expr>, index: Box<Expr>, optional: bool },
-    Array(Vec<Elem>),
-    Object(Vec<ObjElem>),
-    Template(Vec<TemplatePart>),
-    Lambda { params: FnParams, body: Box<Stmt>, is_async: bool, is_arrow: bool },
-    Await(Box<Expr>),
-    Ternary { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
-    IncDec { target: Box<Expr>, is_inc: bool, is_prefix: bool },
-    /// Grouping parens `(expr)`: a thin wrapper the emitter unwraps. It exists
-    /// so `(-2) ** 2` (a parenthesized unary, legal as the left operand of
-    /// `**`) is distinguishable from the bare `-2 ** 2` SyntaxError.
-    Paren(Box<Expr>),
-    /// The comma operator `(a, b, c)`: evaluate each element left-to-right,
-    /// the expression's value is the last one. Only parsed in full-expression
-    /// contexts (parens, statements, return, conds); in argument/array/object/
-    /// declarator lists the comma stays a separator.
-    Sequence(Vec<Expr>),
-    /// `new C(args)` — allocate an instance (proto = `C.prototype`) and call
-    /// the constructor with `this` bound to it.
-    New { callee: Box<Expr>, args: Vec<Elem> },
-    /// `super(args)` inside a derived class's constructor: call the parent
-    /// constructor with the current `this`.
-    SuperCall { args: Vec<Elem> },
-    /// `super.m(args)` inside a method: look `m` up on the method's home
-    /// object's parent prototype and call it with the current `this`.
-    /// `args: None` is a bare `super.m` reference (no call).
-    SuperProp { prop: String, args: Option<Vec<Elem>> },
-    /// `class Name extends Parent { … }` / `class extends Parent { … }` —
-    /// evaluates to the class (constructor) value.
-    Class { name: Option<String>, extends: Option<Box<Expr>>, methods: Vec<MethodDef> },
-    /// `/pattern/flags` — a fresh regex object per evaluation (its own
-    /// `lastIndex`), like JS.
-    Regex { pattern: String, flags: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MethodKind {
-    Normal,
-    Getter,
-    Setter,
-    Field,
-}
-
-#[derive(Debug, Clone)]
-struct MethodDef {
-    name: String,
-    is_static: bool,
-    is_async: bool,
-    kind: MethodKind,
-    params: FnParams,
-    body: Box<Stmt>,
-    init: Option<Expr>,
-}
-
-/// One element of an array literal or call argument list; `spread` marks
-/// `...e` and `hole` marks an elision (`[a, , b]`), which evaluates to
-/// `undefined` in a literal and skips a position in an assignment target.
-#[derive(Debug, Clone)]
-struct Elem {
-    spread: bool,
-    hole: bool,
-    expr: Expr,
-}
-
-/// Where a logical assignment (`&&=`, `||=`, `??=`) writes its result:
-/// a named slot, or a member whose receiver (and index) were stashed in
-/// fresh locals before the RHS ran.
-#[derive(Clone, Copy)]
-enum LStore {
-    Local(u8),
-    Upvalue(u8),
-    Global(u16),
-    /// (constant index of the property name, receiver temp slot)
-    Prop(u16, u8),
-    /// (receiver temp slot, index temp slot)
-    Index(u8, u8),
-}
-
-/// One element of an object literal. `Pair` is a constant-key property;
-/// `Computed` is `[expr]: value` (the key is evaluated at runtime and
-/// coerced to a string); `Spread` is `...expr` (the source's own enumerable
-/// properties are copied in order). Method shorthand `{ f() {} }` is parsed
-/// into a `Pair` whose value is a non-arrow `Lambda`, so `this` binds via the
-/// receiver like any method call.
-#[derive(Debug, Clone)]
-enum ObjElem {
-    Pair(String, Expr),
-    Computed(Expr, Expr),
-    Spread(Expr),
-}
-
-/// One position in an array destructuring pattern: a hole skips an element, a
-/// `Bind` reads one element, and the (last) `Rest` element collects the
-/// remainder of the source into an array.
-#[derive(Debug, Clone)]
-enum PatElem {
-    Hole,
-    Bind(Pat),
-    Rest(Pat),
-}
-
-/// One element of an OBJECT destructuring pattern: a constant key, a
-/// computed key (`[expr]: v` — the key expression is evaluated at runtime),
-/// or the (last) `Rest` element (`...rest` — the source's remaining own
-/// enumerable properties).
-#[derive(Debug, Clone)]
-enum ObjPatElem {
-    Key(String, Pat),
-    Computed(Expr, Pat),
-    Rest(Pat),
-}
-
-/// A destructuring pattern: `Bind(name)` binds a variable; `Object` matches
-/// keys via `GetProperty`; `Array` matches indexes via `GetIndex`.
-#[derive(Debug, Clone)]
-enum Pat {
-    Bind(String),
-    Object(Vec<ObjPatElem>),
-    Array(Vec<PatElem>),
-}
-
-/// One parameter: a binding pattern plus an optional default value
-/// (`function f(a = 1, { b } = {}) {}` — the default is used when the
-/// argument is `undefined`).
-#[derive(Debug, Clone)]
-struct ParamDef {
-    pat: Pat,
-    default: Option<Expr>,
-}
-
-/// A function's parameter list: one [`ParamDef`] per position (the rest
-/// parameter, if any, is the last position — a plain `Bind`).
-#[derive(Debug, Clone)]
-struct FnParams {
-    params: Vec<ParamDef>,
-    rest: Option<usize>,
-}
-
-impl FnParams {
-    /// The callee-frame local layout: one slot per parameter position
-    /// (a `Bind` param IS its slot; a pattern param occupies a synthetic
-    /// `\0param{i}` slot holding the raw argument), then the pattern-bound
-    /// names, then — last — the rest param's slot.
-    fn names(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for (i, p) in self.params.iter().enumerate() {
-            match &p.pat {
-                Pat::Bind(n) => out.push(n.clone()),
-                _ => out.push(format!("\u{0}param{}", i)),
-            }
-        }
-        // Pattern params add their bound names; Bind params were already
-        // pushed above — counting them again double-allocated the slot and
-        // made `resolve`'s rposition hand back the duplicate (param read
-        // one slot past the real argument).
-        for p in &self.params {
-            if matches!(p.pat, Pat::Bind(_)) {
-                continue;
-            }
-            pat_bound_names(&p.pat, &mut out);
-        }
-        out
-    }
-
-    /// Fixed (non-rest) parameter count — what the VM pre-fills with
-    /// undefined on a short call.
-    fn pcount(&self) -> usize {
-        self.params.len() - usize::from(self.rest.is_some())
-    }
-
-    /// The rest param's slot index (always the last local).
-    fn rest_slot(&self) -> usize {
-        self.names().len() - 1
-    }
-}
-
-/// All names bound by a pattern, in order (used to lay out locals).
-fn pat_bound_names(p: &Pat, out: &mut Vec<String>) {
-    match p {
-        Pat::Bind(n) => out.push(n.clone()),
-        Pat::Object(elems) => {
-            for el in elems {
-                match el {
-                    ObjPatElem::Key(_, sub) | ObjPatElem::Computed(_, sub) | ObjPatElem::Rest(sub) => {
-                        pat_bound_names(sub, out)
-                    }
-                }
-            }
-        }
-        Pat::Array(elems) => {
-            for el in elems {
-                match el {
-                    PatElem::Bind(sub) | PatElem::Rest(sub) => pat_bound_names(sub, out),
-                    PatElem::Hole => {}
-                }
-            }
-        }
-    }
-}
-
-/// Where pattern-bound names are stored: `Declare` creates a new
-/// local/global (declaration); `Assign` stores into an existing target.
-#[derive(Clone, Copy)]
-enum PatStoreMode {
-    Declare,
-    Assign,
-}
-
-/// Whether `s` references `name` (`this` / `arguments`) at THIS function's
-/// own level. Nested regular functions/methods have their own `this` and
-/// `arguments`, so their bodies are skipped; nested ARROWS inherit this
-/// function's bindings, so they are descended into (their hidden captures
-/// chain to this function's). Conservative false-positives (an extra hidden
-/// capture) are harmless; false-negatives would break semantics.
-fn stmt_uses_lexical(s: &Stmt, name: &str) -> bool {
-    match s {
-        Stmt::Expr(e) => expr_uses_lexical(e, name),
-        Stmt::VarDecl { decls, .. } => decls
-            .iter()
-            .any(|(_, v)| v.as_ref().map_or(false, |e| expr_uses_lexical(e, name))),
-        Stmt::Return(Some(e)) => expr_uses_lexical(e, name),
-        Stmt::If { cond, then, els } => {
-            expr_uses_lexical(cond, name)
-                || stmt_uses_lexical(then, name)
-                || els.as_ref().map_or(false, |e| stmt_uses_lexical(e, name))
-        }
-        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => {
-            expr_uses_lexical(cond, name) || stmt_uses_lexical(body, name)
-        }
-        Stmt::For { init, cond, update, body } => {
-            init.as_ref().map_or(false, |s| stmt_uses_lexical(s, name))
-                || cond.as_ref().map_or(false, |e| expr_uses_lexical(e, name))
-                || update.as_ref().map_or(false, |e| expr_uses_lexical(e, name))
-                || stmt_uses_lexical(body, name)
-        }
-        Stmt::ForOf { iterable, body, .. } | Stmt::ForIn { obj: iterable, body, .. } => {
-            expr_uses_lexical(iterable, name) || stmt_uses_lexical(body, name)
-        }
-        Stmt::Block(stmts) => stmts.iter().any(|s| stmt_uses_lexical(s, name)),
-        Stmt::Labeled { body, .. } => stmt_uses_lexical(body, name),
-        Stmt::Throw(e) => expr_uses_lexical(e, name),
-        Stmt::Try { body, catch, finally } => {
-            stmt_uses_lexical(body, name)
-                || catch.as_ref().map_or(false, |(_, b)| stmt_uses_lexical(b, name))
-                || finally.as_ref().map_or(false, |b| stmt_uses_lexical(b, name))
-        }
-        Stmt::Switch { disc, cases } => {
-            expr_uses_lexical(disc, name)
-                || cases.iter().any(|c| c.body.iter().any(|s| stmt_uses_lexical(s, name)))
-        }
-        // Own `this`/`arguments`.
-        Stmt::FnDecl { .. } | Stmt::Class { .. } => false,
-        _ => false,
-    }
-}
-
-fn expr_uses_lexical(e: &Expr, name: &str) -> bool {
-    match e {
-        Expr::Ident(n) => n == name,
-        Expr::Bin(_, l, r) => expr_uses_lexical(l, name) || expr_uses_lexical(r, name),
-        Expr::Unary(_, x) | Expr::Await(x) | Expr::Delete(x) | Expr::Paren(x) => {
-            expr_uses_lexical(x, name)
-        }
-        Expr::Assign { target, value, .. } => {
-            expr_uses_lexical(target, name) || expr_uses_lexical(value, name)
-        }
-        Expr::Call { callee, args, .. } => {
-            expr_uses_lexical(callee, name) || args.iter().any(|a| expr_uses_lexical(&a.expr, name))
-        }
-        Expr::Prop { obj, .. } | Expr::IncDec { target: obj, .. } => expr_uses_lexical(obj, name),
-        Expr::Index { obj, index, .. } => expr_uses_lexical(obj, name) || expr_uses_lexical(index, name),
-        Expr::Array(elems) => elems.iter().any(|a| expr_uses_lexical(&a.expr, name)),
-        Expr::Object(fields) => fields.iter().any(|f| match f {
-            ObjElem::Pair(_, v) => expr_uses_lexical(v, name),
-            ObjElem::Computed(k, v) => expr_uses_lexical(k, name) || expr_uses_lexical(v, name),
-            ObjElem::Spread(s) => expr_uses_lexical(s, name),
-        }),
-        Expr::Template(parts) => parts.iter().any(|p| match p {
-            TemplatePart::Lit(_) => false,
-            // Interpolations are raw tokens; a conservative token scan
-            // (a false positive only costs an extra hidden capture).
-            TemplatePart::Expr(ts) => {
-                ts.tokens.iter().any(|t| matches!(t, Token::Ident(n) if n == name))
-            }
-        }),
-        Expr::Ternary { cond, then, els } => {
-            expr_uses_lexical(cond, name)
-                || expr_uses_lexical(then, name)
-                || expr_uses_lexical(els, name)
-        }
-        Expr::Sequence(es) => es.iter().any(|x| expr_uses_lexical(x, name)),
-        Expr::New { callee, args } => {
-            expr_uses_lexical(callee, name) || args.iter().any(|a| expr_uses_lexical(&a.expr, name))
-        }
-        Expr::SuperCall { args } | Expr::SuperProp { args: Some(args), .. } => {
-            args.iter().any(|a| expr_uses_lexical(&a.expr, name))
-        }
-        Expr::SuperProp { args: None, .. } => false,
-        // Nested arrows inherit this function's bindings; regular functions
-        // (and class bodies/methods) bind their own.
-        Expr::Lambda { body, is_arrow, .. } => *is_arrow && stmt_uses_lexical(body, name),
-        Expr::Class { .. } => false,
-        _ => false,
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Stmt {
-    Expr(Expr),
-    /// `let a = 1, { b, c } = obj` — one or more declarators.
-    VarDecl { decls: Vec<(Pat, Option<Expr>)> },
-    FnDecl { name: String, params: FnParams, body: Box<Stmt>, is_async: bool },
-    Return(Option<Expr>),
-    If { cond: Expr, then: Box<Stmt>, els: Option<Box<Stmt>> },
-    While { cond: Expr, body: Box<Stmt> },
-    DoWhile { cond: Expr, body: Box<Stmt> },
-    For { init: Option<Box<Stmt>>, cond: Option<Expr>, update: Option<Expr>, body: Box<Stmt> },
-    ForOf { pat: Pat, declared: bool, iterable: Expr, body: Box<Stmt> },
-    ForIn { pat: Pat, declared: bool, obj: Expr, body: Box<Stmt> },
-    Import { src: String, kind: ImportKind },
-    Block(Vec<Stmt>),
-    Break,
-    Continue,
-    BreakLabel(String),
-    ContinueLabel(String),
-    Labeled { name: String, body: Box<Stmt> },
-    Throw(Expr),
-    Try {
-        body: Box<Stmt>,
-        catch: Option<(String, Box<Stmt>)>,
-        finally: Option<Box<Stmt>>,
-    },
-    Switch { disc: Expr, cases: Vec<SwitchCase> },
-    /// `class Name extends Parent { … }` — a class declaration. The name is
-    /// registered like a function declaration; the value is the class.
-    Class { name: String, extends: Option<Expr>, methods: Vec<MethodDef> },
-    /// `export let a = 1, b = 2` / `export function f() {}` /
-    /// `export { a, b }` / `export { a as c }` / `export default expr`.
-    /// `pairs` is (public export name, source binding name) — an alias is
-    /// `("c", "a")`, a plain declaration `("a", "a")`, and `export default`
-    /// `("default", "\0default")`. `stmt` is the declaration to emit (Nop
-    /// for the `export { ... }` forms); `default` marks the stored-value form.
-    Export { pairs: Vec<(String, String)>, stmt: Box<Stmt>, default: bool },
-    Nop,
-}
-
-/// What an `import` statement binds, by source kind.
-#[derive(Debug, Clone)]
-enum ImportKind {
-    /// `import { f } from 'alloy:core'` — bind each named builtin.
-    Core(Vec<String>),
-    /// `import { f } from './x.py' as python` — bind the alias (or first
-    /// name) to the Python sidecar module object.
-    Python(String),
-    /// `import { f, g as h } from './x.ajs'` — (exported name, local binding)
-    /// pairs, sugar for `require` + property extraction.
-    ModuleNamed(Vec<(String, String)>),
-    /// `import * as m from './x.ajs'` — bind the whole exports object.
-    ModuleNamespace(String),
-    /// `import d from './x.ajs'` — bind the module's default export.
-    ModuleDefault(String),
-    /// `import './x.ajs'` — run the module for its side effects only.
-    ModuleSideEffect,
-}
-
-/// One `case value:` / `default:` arm of a switch: the (optional) test and
-/// the statements until the next arm. A `test` of `None` is `default`.
-#[derive(Debug, Clone)]
-struct SwitchCase {
-    test: Option<Expr>,
-    body: Vec<Stmt>,
-}
-
-/// How a function's captured variable is reached at runtime.
-#[derive(Clone, Copy)]
-enum UpvalueKind {
-    /// A local slot in the immediately enclosing function's frame.
-    Local { slot: u8 },
-    /// An upvalue index in the immediately enclosing function's closure cells.
-    Upvalue { index: u8 },
-    /// An arrow's hidden lexical capture: the enclosing frame's `this` (or
-    /// `arguments`), read via LoadThis/LoadArguments at NewClosure time and
-    /// stored in a cell. Arrows never bind their own `this`/`arguments`.
-    Lexical,
-}
-
-struct UpvalueRef {
-    name: String,
-    kind: UpvalueKind,
-}
-
-struct FuncCtx {
-    locals: Vec<String>,
-    upvalues: Vec<UpvalueRef>,
-    /// Whether this function is `async` (its body may contain `await`).
-    is_async: bool,
-    /// Set when the body references `arguments`: the VM then snapshots the
-    /// passed args into the call frame at entry (the frame's local slots
-    /// overwrite the arg region as the body runs, so a lazy read would see
-    /// locals, not args). Serialized in the NewClosure operand; functions
-    /// that never touch `arguments` pay nothing.
-    uses_arguments: bool,
-    /// Whether this function is an arrow (`x => ...`). Arrows bind `this`
-    /// and `arguments` lexically: their bodies reference hidden `\0this` /
-    /// `\0arguments` upvalues captured at creation, never LoadThis/
-    /// LoadArguments of their own frame.
-    is_arrow: bool,
-}
-
-struct LoopCtx {
-    break_jumps: Vec<usize>,
-    continue_jumps: Vec<usize>,
-    continue_target: usize,
-    /// `trys.len()` when this loop was pushed. `break`/`continue` run the
-    /// finallys of trys nested *inside* the loop only — trys enclosing the
-    /// loop are not exited, so their finallys must not run at the exit site.
-    trys_depth: usize,
-    /// Name of a label directly attached to this loop (`outer: for ...`), if
-    /// any; its `continue` jumps are patched together with this loop's.
-    label: Option<String>,
-    /// Switch contexts are `break` targets but not `continue` targets; an
-    /// unlabeled `continue` skips them and targets the enclosing loop.
-    is_switch: bool,
-}
-
-/// Where a `break`/`continue` jump is recorded: an index into `loops` (the
-/// innermost break/continue target), or into `labels`.
-enum ExitTarget {
-    Loop(usize),
-    Label(usize),
-}
-
-/// A labeled statement being compiled: `name: stmt`. `break name` jumps past
-/// it; `continue name` is only legal when the label is on a loop.
-struct LabelCtx {
-    name: String,
-    is_loop: bool,
-    /// `trys.len()` when the label was pushed — a labeled exit runs the
-    /// finallys of trys between the exit site and the labeled statement.
-    trys_depth: usize,
-    break_jumps: Vec<usize>,
-    continue_jumps: Vec<usize>,
-    continue_target: usize,
-}
-
-/// An active `try` while compiling its body. `finally` bodies are re-emitted
-/// inline at every `break`/`continue`/`return` exit site (JS semantics).
-struct TryCtx {
-    finally: Option<Box<Stmt>>,
-}
-
-enum Resolved {
-    Local(u8),
-    Upvalue(u8),
-    Global(u16),
-}
-
-/// A token that can START an expression. When one of these directly follows a
-/// complete expression (no operator, no postfix), the source is invalid JS —
-/// `0.toString` (the lexer reads `0.` as a number, then the identifier)
-/// `print(1 2)`, `a b`, `x = 5 let y = 2`. Previously the parser silently
-/// swallowed these: the dangling token became a second call argument, array
-/// element, or statement. `LBrace` is deliberately excluded so `a {}` remains
-/// two statements (JS permits it; the call/array/object lists reject `f(a {})`
-/// via their comma checks), and `LParen`/`Dot`/`LBracket`/`PlusPlus`/
-/// `MinusMinus`/`Arrow` never reach here (the postfix loop consumes them).
-/// Map a keyword token back to its source text. Keywords are legal property
-/// names in JS (the IdentifierName rule): `m.default`, `o.delete`, `{ if: 1 }`
-/// all parse even though the words are reserved. Returns None for non-keyword
-/// tokens (operators, literals) that cannot name a property.
-fn keyword_text(t: &Token) -> Option<String> {
-    Some(match t {
-        Token::Ident(s) => return Some(s.clone()),
-        Token::True => "true".into(),
-        Token::False => "false".into(),
-        Token::Null => "null".into(),
-        Token::Undefined => "undefined".into(),
-        Token::Let => "let".into(),
-        Token::Const => "const".into(),
-        Token::Var => "var".into(),
-        Token::Function => "function".into(),
-        Token::Return => "return".into(),
-        Token::If => "if".into(),
-        Token::Else => "else".into(),
-        Token::While => "while".into(),
-        Token::Do => "do".into(),
-        Token::For => "for".into(),
-        Token::In => "in".into(),
-        Token::Of => "of".into(),
-        Token::Import => "import".into(),
-        Token::Export => "export".into(),
-        Token::From => "from".into(),
-        Token::As => "as".into(),
-        Token::Async => "async".into(),
-        Token::Await => "await".into(),
-        Token::New => "new".into(),
-        Token::Typeof => "typeof".into(),
-        Token::Void => "void".into(),
-        Token::Delete => "delete".into(),
-        Token::Break => "break".into(),
-        Token::Continue => "continue".into(),
-        Token::Try => "try".into(),
-        Token::Catch => "catch".into(),
-        Token::Finally => "finally".into(),
-        Token::Throw => "throw".into(),
-        Token::Switch => "switch".into(),
-        Token::Case => "case".into(),
-        Token::Default => "default".into(),
-        Token::Class => "class".into(),
-        Token::Extends => "extends".into(),
-        Token::Super => "super".into(),
-        Token::This => "this".into(),
-        Token::Static => "static".into(),
-        Token::InstanceOf => "instanceof".into(),
-        _ => return None,
-    })
-}
-
-fn starts_expression(t: &Token) -> bool {
-    matches!(
-        t,
-        Token::Ident(_)
-            | Token::Number(_)
-            | Token::Int(_)
-            | Token::StringLit(_)
-            | Token::True
-            | Token::False
-            | Token::Null
-            | Token::Undefined
-            | Token::LBracket
-            | Token::Function
-            | Token::TemplateLit(_)
-            | Token::Async
-            | Token::New
-            | Token::Typeof
-            | Token::Void
-            | Token::Delete
-            | Token::Not
-            | Token::BitNot
-            | Token::Await
-            | Token::Let
-            | Token::Const
-            | Token::Var
-            | Token::If
-            | Token::While
-            | Token::For
-            | Token::Switch
-            | Token::Try
-            | Token::Return
-            | Token::Break
-            | Token::Continue
-            | Token::Throw
-            | Token::Case
-            | Token::Default
-            | Token::Else
-            | Token::Catch
-            | Token::Finally
-            | Token::Import
-            | Token::Export
-            | Token::Of
-            | Token::Class
-            | Token::This
-            | Token::Super
-    )
-}
-
-/// Reserved global holding a module's `export default` value. Collision-proof:
-/// `\0` cannot appear in source identifiers, so no user binding shadows it.
-pub(crate) const DEFAULT_EXPORT: &str = "\0default";
-
-/// All identifier names bound by a destructuring pattern (`let { a, b } = o`
-/// exports both `a` and `b`; `let [x, ...rest] = a` exports `x` and `rest`).
-fn pat_names(p: &Pat) -> Vec<String> {
-    match p {
-        Pat::Bind(n) => vec![n.clone()],
-        Pat::Object(fields) => fields.iter().flat_map(|e| match e {
-            ObjPatElem::Key(_, p) | ObjPatElem::Computed(_, p) | ObjPatElem::Rest(p) => pat_names(p),
-        }).collect(),
-        Pat::Array(elems) => elems
-            .iter()
-            .flat_map(|e| match e {
-                PatElem::Bind(p) | PatElem::Rest(p) => pat_names(p),
-                PatElem::Hole => vec![],
-            })
-            .collect(),
-    }
-}
-
-fn is_native(name: &str) -> bool {
-    matches!(
-        name,
-        "print" | "http" | "memory" | "fs" | "Promise" | "setTimeout" | "setInterval"
-            | "clearTimeout" | "clearInterval" | "queueMicrotask" | "console" | "channel"
-            | "spawn" | "Date" | "Math" | "JSON" | "Number" | "Object" | "Array" | "String"
-            | "parseInt" | "parseFloat" | "isNaN" | "require" | "reload" | "sweepSegments"
-            | "fetchSync" | "crypto" | "URL" | "encodeURIComponent" | "decodeURIComponent"
-            | "encodeURI" | "decodeURI" | "btoa" | "atob"
-            | "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError"
-            | "EvalError" | "URIError" | "NaN" | "Infinity"
-    )
-}
 
 /// The opcode implementing a compound-assignment operator, if `op` is one.
 fn compound_opcode(op: &str) -> Option<Opcode> {
@@ -3092,7 +71,7 @@ impl ChainStep {
 impl Compiler {
     /// A leaf usable as an ArithChain operand: a local or an int literal
     /// (paren-wrapped ok). Everything else (calls, indexes, globals,
-    /// upvalues, strings…) is not chainable — those fall back to the normal
+    /// upvalues, stringsâ€¦) is not chainable â€” those fall back to the normal
     /// stack emission, so the fused opcode is never asked to handle a value
     /// whose evaluation has side effects or unknown identity.
     fn chain_leaf(&mut self, e: &Expr) -> Option<ChainStep> {
@@ -3114,7 +93,7 @@ impl Compiler {
     /// Combine (`acc = t ar acc`), which nests to any depth via the operand
     /// stack. Returns the number of applied arithmetic ops, or None if `e` is
     /// not chainable. The compiled chain is exactly equivalent to running the
-    /// same sequence of ADD/SUB/… opcodes (per-step i64 fast path with the
+    /// same sequence of ADD/SUB/â€¦ opcodes (per-step i64 fast path with the
     /// generic Value fallback), so evaluation order and coercion semantics
     /// are preserved by construction.
     fn build_chain(&mut self, e: &Expr, steps: &mut Vec<ChainStep>) -> Option<usize> {
@@ -3174,7 +153,7 @@ impl Compiler {
 
     /// Emit `l op r` as an ArithChain with the given terminal (`0` discard,
     /// `0x80` push, `0x40|slot` store, `0xC0|slot` store+push). Returns true
-    /// when the chain fired: ≥ 2 ops (single ops are already fused to
+    /// when the chain fired: â‰¥ 2 ops (single ops are already fused to
     /// BinLocalInt/BinLocalLocal at 1 dispatch, so a chain would only add
     /// decode) and at least one local operand (a pure-constant tree is left
     /// to the peephole's constant fold, which precomputes it to a single
@@ -3198,10 +177,10 @@ impl Compiler {
     }
 
     /// Emit `x = <chain>` / `x op= <chain>` (local target) as one ArithChain
-    /// with a store terminal. Always fires when the RHS is chainable — even a
+    /// with a store terminal. Always fires when the RHS is chainable â€” even a
     /// single-op RHS beats the current LoadLocal + value + ArithStoreLocal /
-    /// fused-op + StoreLocal sequences. Falls back (false) for slots ≥ 64
-    /// (the store terminal holds 6 bits) — the existing path still chains the
+    /// fused-op + StoreLocal sequences. Falls back (false) for slots â‰¥ 64
+    /// (the store terminal holds 6 bits) â€” the existing path still chains the
     /// value via emit_arith_chain.
     fn try_emit_chain_assign(&mut self, s: u8, op: &str, value: &Expr, keep: bool) -> bool {
         // Dev A/B switch (see emit_arith_chain).
@@ -3242,7 +221,7 @@ impl Compiler {
             }
         }
         // Emit the chain as one of the fixed-shape register-ALU
-        // superinstructions (lean straight-line handlers — the variable
+        // superinstructions (lean straight-line handlers â€” the variable
         // ArithChain's per-step decode costs more than the dispatches it
         // replaces on these shapes). Non-matching chains fall back to the
         // normal emission below. The ar bytes are the raw arith_code with
@@ -3345,7 +324,7 @@ pub struct Compiler {
     top_globals: bool,
     /// When true, `export` declarations are legal and recorded into
     /// `program.exports` (module mode, set by `compile_module`). In ordinary
-    /// script mode `export` is a loud compile error — Node also rejects it
+    /// script mode `export` is a loud compile error â€” Node also rejects it
     /// outside ES modules.
     in_module: bool,
     /// Names declared at the top level (globals), as opposed to merely read:
@@ -3353,7 +332,7 @@ pub struct Compiler {
     /// true (sloppy JS), and the globals table itself conflates the two.
     declared_globals: std::collections::HashSet<String>,
     /// Names bound by `import` statements (module files). Assigning to an
-    /// import is an ESM SyntaxError — here it's a loud compile error, so a
+    /// import is an ESM SyntaxError â€” here it's a loud compile error, so a
     /// live-import cell can never be clobbered from the importing scope.
     imported_bindings: std::collections::HashSet<String>,
     /// Counter for compiler-generated temporary names (for-of/in desugaring).
@@ -3379,6 +358,14 @@ pub struct Compiler {
     /// values are consumed by their parent), which the keep-aware arms enforce
     /// by scoping their operand emissions.
     keep_result: bool,
+    current_line: u32,
+    current_col: u32,
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Compiler {
@@ -3403,7 +390,15 @@ impl Compiler {
             labels: Vec::new(),
             pending_label: None,
             keep_result: true,
+            current_line: 1,
+            current_col: 1,
         }
+    }
+
+    fn record_loc(&mut self, line: u32, col: u32) {
+        self.current_line = line;
+        self.current_col = col;
+        self.program.record_location(line, col);
     }
 
     /// Emit `e` with its value discarded: the top-level assignment/inc/dec
@@ -3423,7 +418,7 @@ impl Compiler {
     fn emit_stmt_expr(&mut self, e: &Expr) -> Result<(), CompileError> {
         // Optional chains always push their value (their short-circuit paths
         // produce undefined at the same stack position), so they cannot use
-        // the keep=0 call variants — the statement discards with a Pop.
+        // the keep=0 call variants â€” the statement discards with a Pop.
         if Self::is_optional_chain(e) {
             self.emit_expr(e)?;
             self.program.emit_op(Opcode::Pop);
@@ -3470,7 +465,7 @@ impl Compiler {
             }
             Expr::Ident(name) => {
                 // `delete x`: a bound identifier (local, upvalue, declared
-                // top-level global, or native) can't be deleted — false. An
+                // top-level global, or native) can't be deleted â€” false. An
                 // undeclared global reference deletes to true (sloppy JS).
                 let bound = self.funcs.last().unwrap().locals.iter().any(|l| l == name)
                     || self.funcs.iter().skip(1).any(|f| f.locals.iter().any(|l| l == name))
@@ -3480,7 +475,7 @@ impl Compiler {
                 Ok(())
             }
             other => {
-                // `delete f()`, `delete (5)`, `delete (a ? b : c)` … —
+                // `delete f()`, `delete (5)`, `delete (a ? b : c)` â€¦ â€”
                 // evaluate for side effects, the result is true.
                 self.emit_stmt_expr(other)?;
                 self.program.emit_op(Opcode::LoadTrue);
@@ -3616,6 +611,7 @@ impl Compiler {
     /// descending into nested functions, which allocate their own locals).
     fn collect_declared(stmt: &Stmt, out: &mut Vec<String>) {
         match stmt {
+            Stmt::Loc { stmt, .. } => Self::collect_declared(stmt, out),
             Stmt::VarDecl { decls } => {
                 for (pat, _) in decls {
                     Self::collect_pat_names(pat, out);
@@ -3808,7 +804,7 @@ impl Compiler {
                     return UpvalueKind::Upvalue { index: i as u8 };
                 }
                 // An arrow without this hidden capture does not bind the
-                // name, so it passes through lexically — keep scanning.
+                // name, so it passes through lexically â€” keep scanning.
             } else {
                 return UpvalueKind::Lexical;
             }
@@ -3827,12 +823,12 @@ impl Compiler {
             .map(|i| i as u8)
     }
 
-    /// `target &&= / ||= / ??= value` — short-circuit assignment. The target's
+    /// `target &&= / ||= / ??= value` â€” short-circuit assignment. The target's
     /// reference (receiver, optional index) is evaluated exactly once and
     /// stashed in temps; the current value is read and tested, and only when
     /// the test fails (falsy / truthy / nullish) is the RHS evaluated and
     /// written. The expression's value is the old value on the short-circuit
-    /// path, the new value otherwise — matching JS.
+    /// path, the new value otherwise â€” matching JS.
     fn emit_logical_assign(
         &mut self,
         op: &str,
@@ -3870,7 +866,7 @@ impl Compiler {
                 self.program.emit_u8(ti);
                 LStore::Index(to, ti)
             }
-            // Invalid targets (calls, literals, …) fall through to the main
+            // Invalid targets (calls, literals, â€¦) fall through to the main
             // assignment arm, which reports the error.
             _ => return Ok(()),
         };
@@ -3888,7 +884,7 @@ impl Compiler {
                 self.program.emit_op(Opcode::LoadGlobal);
                 self.program.emit_u16(*i);
             }
-            // GetProperty reads its key from the inline constant — it does
+            // GetProperty reads its key from the inline constant â€” it does
             // NOT consume a key from the stack (only the object), so no
             // LoadConst here; that would leave a stray key on the stack.
             LStore::Prop(pi, t) => {
@@ -4025,9 +1021,9 @@ impl Compiler {
                     let (key, value) = match f {
                         ObjElem::Pair(k, v) => (k, v),
                         // Loud errors: computed keys/spreads are legal in JS
-                        // assignment targets but unsupported here — better a
+                        // assignment targets but unsupported here â€” better a
                         // compile error than a silent misparse.
-                        ObjElem::Computed(..) | ObjElem::Spread(..) => {
+                        ObjElem::Computed(..) | ObjElem::Spread(..) | ObjElem::Getter(..) | ObjElem::Setter(..) => {
                             return Err(CompileError::UnexpectedToken(
                                 "computed keys and spreads are not supported in destructuring patterns".to_string(),
                             ));
@@ -4054,7 +1050,7 @@ impl Compiler {
                         continue;
                     }
                     if el.spread {
-                        // `...rest` in an assignment target — must be last.
+                        // `...rest` in an assignment target â€” must be last.
                         let sub = match &el.expr {
                             Expr::Ident(name) => Pat::Bind(name.clone()),
                             Expr::Object(_) | Expr::Array(_) => Self::expr_to_pattern(&el.expr)?,
@@ -4095,7 +1091,7 @@ impl Compiler {
     /// Fuse the string-accumulator assignment `s = s + X` / `s += X` (the
     /// target is a local `s`) into a single dispatch: read the local, add the
     /// RHS (a folded string constant, another local, or the value pushed
-    /// after a lhs snapshot — JS evaluation order), store back, and keep the
+    /// after a lhs snapshot â€” JS evaluation order), store back, and keep the
     /// result when the assignment's value is consumed. Returns true when the
     /// shape matched and the fused code was emitted.
     fn emit_append_assignment(
@@ -4140,7 +1136,7 @@ impl Compiler {
         }
         match r {
             // String literal leaf: fold into the opcode (the accumulator
-            // case — one dispatch for the whole append).
+            // case â€” one dispatch for the whole append).
             Expr::Str(sl) => {
                 let ci = self.program.add_constant(Value::string(sl.clone()));
                 self.program.emit_op(Opcode::AppendStringConst);
@@ -4174,7 +1170,7 @@ impl Compiler {
     }
 
     /// Store the value on top of the stack into `name`, creating a local (or
-    /// REPL global) if needed — the declaration path.
+    /// REPL global) if needed â€” the declaration path.
     fn store_declared(&mut self, name: &str) -> Result<(), CompileError> {
         if is_native(name) {
             return Err(CompileError::CannotShadowBuiltin(name.to_string()));
@@ -4198,7 +1194,7 @@ impl Compiler {
     }
 
     /// Store the value on top of the stack into `name`, resolving to an
-    /// existing local/upvalue/global — the assignment path.
+    /// existing local/upvalue/global â€” the assignment path.
     fn store_assign(&mut self, name: &str) -> Result<(), CompileError> {
         match self.resolve(name) {
             Resolved::Local(s) => {
@@ -4354,7 +1350,7 @@ impl Compiler {
         None
     }
 
-    /// `local + int` / `local - int` / … — the BinLocalInt shape (`j + 1`).
+    /// `local + int` / `local - int` / â€¦ â€” the BinLocalInt shape (`j + 1`).
     /// Returns (slot, arith code, immediate). Only pure arithmetic on a
     /// local and a compile-time int: fusing it into an index write is
     /// unobservable (no side effects in the operands).
@@ -4373,7 +1369,7 @@ impl Compiler {
         None
     }
 
-    /// Find the index of a forced class upvalue (`\0home` — the parent class
+    /// Find the index of a forced class upvalue (`\0home` â€” the parent class
     /// or the class's prototype) in the current function's capture list.
     /// Absent means `super` was used somewhere it is not legal (outside a
     /// derived-class method/constructor).
@@ -4387,7 +1383,7 @@ impl Compiler {
             })
     }
 
-    /// Emit one class method as a closure — mirrors the Lambda emission but
+    /// Emit one class method as a closure â€” mirrors the Lambda emission but
     /// starts the function's upvalue list with the forced `\0home` capture
     /// (the class's prototype for instance methods, the parent class for the
     /// constructor of a derived class) so `super` can resolve it by name.
@@ -4396,6 +1392,7 @@ impl Compiler {
     fn emit_method(&mut self, m: &MethodDef, home: Option<UpvalueKind>) -> Result<(), CompileError> {
         let j = self.emit_jump(Opcode::Jump);
         let start = self.program.bytecode.len();
+        self.program.record_function_name(start, m.name.clone());
         let mut upvalues = Vec::new();
         if let Some(kind) = home {
             upvalues.push(UpvalueRef { name: "\u{0}home".to_string(), kind });
@@ -4418,6 +1415,9 @@ impl Compiler {
             self.program.emit_op(Opcode::NewPromise);
             self.program.emit_u8(ps);
         }
+        if m.is_generator {
+            self.program.emit_op(Opcode::CreateGenerator);
+        }
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_trys = std::mem::take(&mut self.trys);
         let saved_finally = std::mem::take(&mut self.finally_locals);
@@ -4436,7 +1436,7 @@ impl Compiler {
         let ci = self.program.add_constant(Value::number(start as f64));
         // Fixed params only: `names` includes the rest param (if any), but
         // the rest slot is materialized by MakeRestArray from the args beyond
-        // the fixed params — the missing-arg fill must stop before it (a
+        // the fixed params â€” the missing-arg fill must stop before it (a
         // filled rest slot would become a spurious array element).
         let pcount = m.params.names().len() as u8 - u8::from(m.params.rest.is_some());
         self.emit_captures(&ctx);
@@ -4450,7 +1450,7 @@ impl Compiler {
 
     /// Any member/call chain containing a `?.` link. Such a chain must be
     /// emitted atomically: the nullish check short-circuits the ENTIRE
-    /// remaining chain (later properties, indices, call arguments — none of
+    /// remaining chain (later properties, indices, call arguments â€” none of
     /// them evaluate when the guarded receiver is nullish).
     fn is_optional_chain(e: &Expr) -> bool {
         match e {
@@ -4466,8 +1466,8 @@ impl Compiler {
     /// links outward), then emitted with a nullish guard per `?.` link:
     /// `Dup; JumpIfNullish L; Pop` before the link. Every guard jumps to a
     /// short-circuit path AFTER the whole chain, so when the guarded
-    /// receiver is nullish the rest of the chain — later members AND call
-    /// arguments — never evaluates, exactly like JS. Each skip path discards
+    /// receiver is nullish the rest of the chain â€” later members AND call
+    /// arguments â€” never evaluates, exactly like JS. Each skip path discards
     /// the `pushed` stack values the chain accumulated so far and pushes
     /// undefined.
     ///
@@ -4705,7 +1705,7 @@ impl Compiler {
                     return Ok(());
                 }
                 if name == "arguments" && self.funcs.len() > 1 {
-                    // The call's argument list — array snapshot of the passed
+                    // The call's argument list â€” array snapshot of the passed
                     // args. A local/param/upvalue named `arguments` shadows
                     // it (JS allows `function f(arguments) {}`); at top level
                     // it falls through to the normal resolve (undefined).
@@ -4818,7 +1818,7 @@ impl Compiler {
                         // locals/literals (`3 * n + 1`, `(lo + hi) % 2`)
                         // collapse into ONE ArithChain dispatch that keeps the
                         // running value in an i64 register. Only chains with
-                        // ≥ 2 ops fire — single ops are already fused below.
+                        // â‰¥ 2 ops fire â€” single ops are already fused below.
                         let term = if self.keep_result { 0x80 } else { 0 };
                         if self.emit_arith_chain(op, l, r, term) {
                             return Ok(());
@@ -5099,7 +2099,7 @@ impl Compiler {
                             // disturbing them; the result is the RHS value.
                             //
                             // Fusion (compiler-side, so operand roles are
-                            // unambiguous — the peephole cannot tell a plain
+                            // unambiguous â€” the peephole cannot tell a plain
                             // `arr[i] = v` from the stash path's trailing
                             // reloads): when every operand is a pure local
                             // read with no side effects, skipping the stash
@@ -5221,7 +2221,7 @@ impl Compiler {
                 let mask = args.iter().enumerate().fold(0u16, |m, (i, a)| {
                     if a.spread { m | (1 << i) } else { m }
                 });
-                // Method calls bind `this`: `o.m(...)` / `o[i](...)` — parens
+                // Method calls bind `this`: `o.m(...)` / `o[i](...)` â€” parens
                 // don't strip the reference (`(o.m)()` still binds). The
                 // receiver stays below the callee so the frame can read it as
                 // its this slot. Note: the member lookup runs before the args
@@ -5310,7 +2310,7 @@ impl Compiler {
                 // `super(a)` in a derived class's constructor: call the
                 // captured parent class with the current `this` bound.
                 let u = self.find_upvalue("\u{0}home")?;
-                // [this, parent, args...] — CallMethod layout.
+                // [this, parent, args...] â€” CallMethod layout.
                 self.program.emit_op(Opcode::LoadThis);
                 self.program.emit_op(Opcode::LoadUpvalue);
                 self.program.emit_u8(u);
@@ -5345,7 +2345,7 @@ impl Compiler {
                 let pi = self.program.add_constant(Value::string(prop.clone()));
                 match args {
                     Some(args) => {
-                        // [this, this, home.proto, m, args...] — CallMethod
+                        // [this, this, home.proto, m, args...] â€” CallMethod
                         // reads the receiver from below the frame base.
                         self.program.emit_op(Opcode::LoadThis);
                         self.program.emit_op(Opcode::Dup);
@@ -5415,8 +2415,8 @@ impl Compiler {
                 self.program.emit_u16(0);
                 self.program.emit_op(Opcode::StoreLocal);
                 self.program.emit_u8(proto_slot);
-                // 3. Instance methods → proto.
-                for m in methods.iter().filter(|m| m.name != "constructor" && !m.is_static) {
+                // 3. Instance methods / accessors → proto.
+                for m in methods.iter().filter(|m| m.name != "constructor" && !m.is_static && m.kind != MethodKind::Field && !m.name.starts_with('#')) {
                     let home = if has_parent {
                         Some(UpvalueKind::Local { slot: proto_slot })
                     } else {
@@ -5428,44 +2428,107 @@ impl Compiler {
                     let pi = self.program.add_constant(Value::string(m.name.clone()));
                     self.program.emit_op(Opcode::LoadConst);
                     self.program.emit_u16(pi);
-                    self.program.emit_op(Opcode::SetProperty);
+                    match m.kind {
+                        MethodKind::Getter => {
+                            self.program.emit_op(Opcode::SetAccessor);
+                            self.program.emit_u8(1);
+                        }
+                        MethodKind::Setter => {
+                            self.program.emit_op(Opcode::SetAccessor);
+                            self.program.emit_u8(2);
+                        }
+                        _ => {
+                            self.program.emit_op(Opcode::SetProperty);
+                        }
+                    }
                 }
                 // 4. The constructor (the class value), stored on the proto
                 //    as "constructor". A derived constructor captures the
                 //    parent class for `super()`.
-                let ctor = methods.iter().find(|m| m.name == "constructor");
-                match ctor {
-                    Some(m) => {
-                        let home = if has_parent {
-                            Some(UpvalueKind::Local { slot: parent_slot })
-                        } else {
-                            None
+                let mut field_stmts: Vec<Stmt> = Vec::new();
+                for m in methods.iter().filter(|m| !m.is_static) {
+                    if m.kind == MethodKind::Field {
+                        let target = Expr::Prop {
+                            obj: Box::new(Expr::Ident("this".to_string())),
+                            prop: m.name.clone(),
+                            optional: false,
                         };
-                        self.emit_method(m, home)?;
-                    }
-                    None => {
-                        // Default `constructor() {}` — its implicit undefined
-                        // return is converted to the instance by the ctor
-                        // return rule.
-                        let empty = Stmt::Block(Vec::new());
-                        self.emit_method(
-                            &MethodDef {
-                                name: "constructor".into(),
-                                is_static: false,
-                                is_async: false,
-                                kind: MethodKind::Normal,
-                                params: FnParams { params: Vec::new(), rest: None },
-                                body: Box::new(empty),
-                                init: None,
-                            },
-                            if has_parent {
-                                Some(UpvalueKind::Local { slot: parent_slot })
-                            } else {
-                                None
-                            },
-                        )?;
+                        let value = m.init.clone().unwrap_or(Expr::Undef);
+                        field_stmts.push(Stmt::Expr(Expr::Assign {
+                            op: "=",
+                            target: Box::new(target),
+                            value: Box::new(value),
+                        }));
+                    } else if m.name.starts_with('#') {
+                        let target = Expr::Prop {
+                            obj: Box::new(Expr::Ident("this".to_string())),
+                            prop: m.name.clone(),
+                            optional: false,
+                        };
+                        let value = Expr::Lambda {
+                            params: m.params.clone(),
+                            body: m.body.clone(),
+                            is_async: m.is_async,
+                            is_generator: m.is_generator,
+                            is_arrow: false,
+                        };
+                        field_stmts.push(Stmt::Expr(Expr::Assign {
+                            op: "=",
+                            target: Box::new(target),
+                            value: Box::new(value),
+                        }));
                     }
                 }
+
+                let ctor = methods.iter().find(|m| m.name == "constructor");
+                let home = if has_parent {
+                    Some(UpvalueKind::Local { slot: parent_slot })
+                } else {
+                    None
+                };
+
+                let mut ctor_def = match ctor {
+                    Some(m) => m.clone(),
+                    None => MethodDef {
+                        name: "constructor".into(),
+                        is_static: false,
+                        is_async: false,
+                        is_generator: false,
+                        kind: MethodKind::Normal,
+                        params: FnParams { params: Vec::new(), rest: None },
+                        body: Box::new(Stmt::Block(Vec::new())),
+                        init: None,
+                    },
+                };
+
+                if !field_stmts.is_empty() {
+                    let mut new_body = Vec::new();
+                    let mut b = &*ctor_def.body;
+                    while let Stmt::Loc { stmt, .. } = b {
+                        b = stmt;
+                    }
+                    let orig_stmts = match b {
+                        Stmt::Block(s) => s.clone(),
+                        s => vec![s.clone()],
+                    };
+                    let super_idx = orig_stmts.iter().position(|s| {
+                        let mut st = s;
+                        while let Stmt::Loc { stmt, .. } = st {
+                            st = stmt;
+                        }
+                        matches!(st, Stmt::Expr(Expr::SuperCall { .. }))
+                    });
+                    if let Some(idx) = super_idx {
+                        new_body.extend(orig_stmts[..=idx].iter().cloned());
+                        new_body.extend(field_stmts);
+                        new_body.extend(orig_stmts[idx + 1..].iter().cloned());
+                    } else {
+                        new_body.extend(field_stmts);
+                        new_body.extend(orig_stmts);
+                    }
+                    *ctor_def.body = Stmt::Block(new_body);
+                }
+                self.emit_method(&ctor_def, home)?;
                 // The class value IS the constructor: keep a copy on the
                 // stack (SetProperty consumes its operands), bind the proto's
                 // `constructor` back-reference, then stash the class into its
@@ -5500,18 +2563,41 @@ impl Compiler {
                     self.program.emit_u16(pi);
                     self.program.emit_op(Opcode::SetProto);
                 }
-                // 7. Static methods → the class function itself. No home
-                //    capture: `super` in a static method is rejected at
-                //    compile time (static-super needs the class's own proto,
-                //    which the function model does not carry).
+                // 7. Static members (methods, fields, accessors) → the class function itself.
                 for m in methods.iter().filter(|m| m.is_static) {
-                    self.emit_method(m, None)?;
-                    self.program.emit_op(Opcode::LoadLocal);
-                    self.program.emit_u8(class_slot);
-                    let pi = self.program.add_constant(Value::string(m.name.clone()));
-                    self.program.emit_op(Opcode::LoadConst);
-                    self.program.emit_u16(pi);
-                    self.program.emit_op(Opcode::SetProperty);
+                    if m.kind == MethodKind::Field {
+                        if let Some(init) = &m.init {
+                            self.emit_expr(init)?;
+                        } else {
+                            self.program.emit_op(Opcode::LoadUndefined);
+                        }
+                        self.program.emit_op(Opcode::LoadLocal);
+                        self.program.emit_u8(class_slot);
+                        let pi = self.program.add_constant(Value::string(m.name.clone()));
+                        self.program.emit_op(Opcode::LoadConst);
+                        self.program.emit_u16(pi);
+                        self.program.emit_op(Opcode::SetProperty);
+                    } else {
+                        self.emit_method(m, None)?;
+                        self.program.emit_op(Opcode::LoadLocal);
+                        self.program.emit_u8(class_slot);
+                        let pi = self.program.add_constant(Value::string(m.name.clone()));
+                        self.program.emit_op(Opcode::LoadConst);
+                        self.program.emit_u16(pi);
+                        match m.kind {
+                            MethodKind::Getter => {
+                                self.program.emit_op(Opcode::SetAccessor);
+                                self.program.emit_u8(1);
+                            }
+                            MethodKind::Setter => {
+                                self.program.emit_op(Opcode::SetAccessor);
+                                self.program.emit_u8(2);
+                            }
+                            _ => {
+                                self.program.emit_op(Opcode::SetProperty);
+                            }
+                        }
+                    }
                 }
                 // 8. The class value is the expression result.
                 self.program.emit_op(Opcode::LoadLocal);
@@ -5573,31 +2659,88 @@ impl Compiler {
                 self.program.emit_u16(i);
             }
             Expr::Object(fields) => {
-                // Constant keys push (key, value) pairs; computed keys push
-                // (runtime key, value); spreads push a single value (the
-                // mask bit tells MakeObject to expand it in place).
-                let mut mask = 0u16;
-                for (i, f) in fields.iter().enumerate() {
-                    match f {
-                        ObjElem::Pair(key, value) => {
-                            let ki = self.program.add_constant(Value::string(key.clone()));
-                            self.program.emit_op(Opcode::LoadConst);
-                            self.program.emit_u16(ki);
-                            self.emit_expr(value)?;
-                        }
-                        ObjElem::Computed(key, value) => {
-                            self.emit_expr(key)?;
-                            self.emit_expr(value)?;
-                        }
-                        ObjElem::Spread(src) => {
-                            mask |= 1 << i;
-                            self.emit_expr(src)?;
+                let has_accessors = fields.iter().any(|f| matches!(f, ObjElem::Getter(..) | ObjElem::Setter(..)));
+                if !has_accessors {
+                    let mut mask = 0u16;
+                    for (i, f) in fields.iter().enumerate() {
+                        match f {
+                            ObjElem::Pair(key, value) => {
+                                let ki = self.program.add_constant(Value::string(key.clone()));
+                                self.program.emit_op(Opcode::LoadConst);
+                                self.program.emit_u16(ki);
+                                self.emit_expr(value)?;
+                            }
+                            ObjElem::Computed(key, value) => {
+                                self.emit_expr(key)?;
+                                self.emit_expr(value)?;
+                            }
+                            ObjElem::Spread(src) => {
+                                mask |= 1 << i;
+                                self.emit_expr(src)?;
+                            }
+                            ObjElem::Getter(..) | ObjElem::Setter(..) => unreachable!(),
                         }
                     }
+                    self.program.emit_op(Opcode::MakeObject);
+                    self.program.emit_u16(fields.len() as u16);
+                    self.program.emit_u16(mask);
+                } else {
+                    let normal_fields: Vec<&ObjElem> = fields.iter().filter(|f| !matches!(f, ObjElem::Getter(..) | ObjElem::Setter(..))).collect();
+                    let mut mask = 0u16;
+                    for (i, f) in normal_fields.iter().enumerate() {
+                        match f {
+                            ObjElem::Pair(key, value) => {
+                                let ki = self.program.add_constant(Value::string(key.clone()));
+                                self.program.emit_op(Opcode::LoadConst);
+                                self.program.emit_u16(ki);
+                                self.emit_expr(value)?;
+                            }
+                            ObjElem::Computed(key, value) => {
+                                self.emit_expr(key)?;
+                                self.emit_expr(value)?;
+                            }
+                            ObjElem::Spread(src) => {
+                                mask |= 1 << i;
+                                self.emit_expr(src)?;
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    self.program.emit_op(Opcode::MakeObject);
+                    self.program.emit_u16(normal_fields.len() as u16);
+                    self.program.emit_u16(mask);
+                    let obj_slot = self.fresh_local();
+                    self.program.emit_op(Opcode::StoreLocal);
+                    self.program.emit_u8(obj_slot);
+
+                    for f in fields {
+                        match f {
+                            ObjElem::Getter(name, expr) => {
+                                self.emit_expr(expr)?;
+                                self.program.emit_op(Opcode::LoadLocal);
+                                self.program.emit_u8(obj_slot);
+                                let ki = self.program.add_constant(Value::string(name.clone()));
+                                self.program.emit_op(Opcode::LoadConst);
+                                self.program.emit_u16(ki);
+                                self.program.emit_op(Opcode::SetAccessor);
+                                self.program.emit_u8(1);
+                            }
+                            ObjElem::Setter(name, expr) => {
+                                self.emit_expr(expr)?;
+                                self.program.emit_op(Opcode::LoadLocal);
+                                self.program.emit_u8(obj_slot);
+                                let ki = self.program.add_constant(Value::string(name.clone()));
+                                self.program.emit_op(Opcode::LoadConst);
+                                self.program.emit_u16(ki);
+                                self.program.emit_op(Opcode::SetAccessor);
+                                self.program.emit_u8(2);
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.program.emit_op(Opcode::LoadLocal);
+                    self.program.emit_u8(obj_slot);
                 }
-                self.program.emit_op(Opcode::MakeObject);
-                self.program.emit_u16(fields.len() as u16);
-                self.program.emit_u16(mask);
             }
             Expr::Template(parts) => {
                 // `` `a${x}b` `` compiles to "" + "a" + x + "b", coercing
@@ -5624,12 +2767,13 @@ impl Compiler {
                     self.program.emit_op(Opcode::Add);
                 }
             }
-            Expr::Lambda { params, body, is_async, is_arrow } => {
+            Expr::Lambda { params, body, is_async, is_generator, is_arrow } => {
                 if params.params.iter().any(|p| p.default.is_some()) {
                     return Err(CompileError::UnexpectedToken("default parameters are not yet supported — use explicit `if (x===undefined) x=...` inside the body".to_string()));
                 }
                 let j = self.emit_jump(Opcode::Jump);
                 let start = self.program.bytecode.len();
+                self.program.record_function_name(start, "<anonymous>".to_string());
                 // Arrows bind `this`/`arguments` lexically. When the body
                 // references them (directly or inside nested arrows), the
                 // arrow gets hidden `\0this`/`\0arguments` upvalues: a direct
@@ -5680,6 +2824,9 @@ impl Compiler {
                     self.program.emit_op(Opcode::NewPromise);
                     self.program.emit_u8(ps);
                 }
+                if *is_generator {
+                    self.program.emit_op(Opcode::CreateGenerator);
+                }
                 let saved_loops = std::mem::take(&mut self.loops);
                 let saved_trys = std::mem::take(&mut self.trys);
                 let saved_finally = std::mem::take(&mut self.finally_locals);
@@ -5696,7 +2843,7 @@ impl Compiler {
                 let ctx = self.funcs.pop().unwrap();
                 self.patch_jump(j);
                 let ci = self.program.add_constant(Value::number(start as f64));
-                // Fixed params only — `names` includes the rest param, but
+                // Fixed params only â€” `names` includes the rest param, but
                 // the rest slot is materialized by MakeRestArray and must not
                 // be pre-filled (see emit_method).
                 let pcount = params.names().len() as u8 - u8::from(params.rest.is_some());
@@ -5739,7 +2886,7 @@ impl Compiler {
                 while let Expr::Paren(inner) = target_ref { target_ref = inner.as_ref(); }
                 match target_ref {
                     Expr::Ident(name) => {
-                        // `++imported` is also an assignment — same loud error.
+                        // `++imported` is also an assignment â€” same loud error.
                         if self.imported_bindings.contains(name) {
                             return Err(CompileError::AssignToImport(name.clone()));
                         }
@@ -5757,7 +2904,7 @@ impl Compiler {
                         }
                         Resolved::Upvalue(u) => {
                             // keep=0: the result is discarded, so both forms
-                            // collapse to load / ±1 / store (the Add pushes the
+                            // collapse to load / Â±1 / store (the Add pushes the
                             // new value, StoreUpvalue consumes it).
                             if !keep {
                                 self.program.emit_op(Opcode::LoadUpvalue);
@@ -5811,7 +2958,7 @@ impl Compiler {
                     },
                     Expr::Prop { obj, prop, .. } => {
                         // o.a++ / ++o.a / o.a-- / --o.a: one fused opcode reads
-                        // obj.p, adds ±1, writes it back, and pushes the old
+                        // obj.p, adds Â±1, writes it back, and pushes the old
                         // (postfix) or new (prefix) value (if keep). The obj
                         // stays on the stack and evaluates exactly once.
                         let pi = self.program.add_constant(Value::string(prop.clone()));
@@ -5823,7 +2970,7 @@ impl Compiler {
                     }
                     Expr::Index { obj, index, .. } => {
                         // a[i]++ / ++a[i] / a[i]-- / --a[i]: one fused opcode
-                        // reads obj[idx], adds ±1, writes back, and pushes the
+                        // reads obj[idx], adds Â±1, writes back, and pushes the
                         // old (postfix) or new (prefix) value (if keep). The
                         // obj and index stay on the stack, each evaluating once.
                         let flags = (*is_prefix as u8) | ((!*is_inc as u8) << 1) | ((keep as u8) << 2);
@@ -5840,7 +2987,7 @@ impl Compiler {
                 }
             }
             Expr::Ternary { cond, then, els } => {
-                // cond ? then : else — only the taken branch evaluates, and
+                // cond ? then : else â€” only the taken branch evaluates, and
                 // the condition is discarded, so `&&` / `||` fuse via
                 // emit_cond: falsy edges jump to the else branch,
                 // truthy-`||` edges jump to the then branch.
@@ -5855,12 +3002,80 @@ impl Compiler {
                 self.emit_expr(els)?;
                 self.patch_jump(end);
             }
+            Expr::Yield { value, delegate } => {
+                if *delegate {
+                    if let Some(val_expr) = value {
+                        self.emit_expr(val_expr)?;
+                    } else {
+                        self.program.emit_op(Opcode::LoadUndefined);
+                    }
+                    self.program.emit_op(Opcode::ToIterable);
+                    let arr_slot = self.fresh_local();
+                    let idx_slot = self.fresh_local();
+                    let len_slot = self.fresh_local();
+                    self.program.emit_op(Opcode::StoreLocal);
+                    self.program.emit_u8(arr_slot);
+                    // idx = 0
+                    self.program.emit_op(Opcode::LoadInt);
+                    self.program.emit_u32(0);
+                    self.program.emit_op(Opcode::StoreLocal);
+                    self.program.emit_u8(idx_slot);
+                    // len = arr.length
+                    self.program.emit_op(Opcode::LoadLocal);
+                    self.program.emit_u8(arr_slot);
+                    let lc = self.program.add_constant(Value::string("length".to_string()));
+                    self.program.emit_op(Opcode::GetProperty);
+                    self.program.emit_u16(lc);
+                    self.program.emit_op(Opcode::StoreLocal);
+                    self.program.emit_u8(len_slot);
+                    // loop: while idx < len
+                    let ls = self.program.bytecode.len();
+                    self.program.emit_op(Opcode::LoadLocal);
+                    self.program.emit_u8(idx_slot);
+                    self.program.emit_op(Opcode::LoadLocal);
+                    self.program.emit_u8(len_slot);
+                    self.program.emit_op(Opcode::Less);
+                    let ej = self.emit_jump(Opcode::JumpIfFalsePop);
+                    // val = arr[idx]
+                    self.program.emit_op(Opcode::LoadLocal);
+                    self.program.emit_u8(arr_slot);
+                    self.program.emit_op(Opcode::LoadLocal);
+                    self.program.emit_u8(idx_slot);
+                    self.program.emit_op(Opcode::GetIndex);
+                    self.program.emit_op(Opcode::Yield);
+                    self.program.emit_op(Opcode::Pop);
+                    // idx += 1
+                    self.program.emit_op(Opcode::LoadLocal);
+                    self.program.emit_u8(idx_slot);
+                    self.program.emit_op(Opcode::LoadInt);
+                    self.program.emit_u32(1);
+                    self.program.emit_op(Opcode::Add);
+                    self.program.emit_op(Opcode::StoreLocal);
+                    self.program.emit_u8(idx_slot);
+                    let back = self.emit_jump(Opcode::Jump);
+                    self.patch_jump_to(back, ls);
+                    self.patch_jump(ej);
+                    self.program.emit_op(Opcode::LoadUndefined);
+                } else {
+                    // Emit the yielded value (or undefined if `yield;`)
+                    if let Some(val_expr) = value {
+                        self.emit_expr(val_expr)?;
+                    } else {
+                        self.program.emit_op(Opcode::LoadUndefined);
+                    }
+                    self.program.emit_op(Opcode::Yield);
+                }
+            }
         }
         Ok(())
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), CompileError> {
         match stmt {
+            Stmt::Loc { line, col, stmt } => {
+                self.record_loc(*line, *col);
+                self.emit_stmt(stmt)?;
+            }
             Stmt::Expr(e) => self.emit_stmt_expr(e)?,
             Stmt::VarDecl { decls } => {
                 for (pat, init) in decls {
@@ -5888,7 +3103,7 @@ impl Compiler {
                     }
                 }
             }
-            Stmt::FnDecl { name, params, body, is_async } => {
+            Stmt::FnDecl { name, params, body, is_async, is_generator } => {
                 if is_native(name) {
                     return Err(CompileError::CannotShadowBuiltin(name.clone()));
                 }
@@ -5897,6 +3112,7 @@ impl Compiler {
                 }
                 let j = self.emit_jump(Opcode::Jump);
                 let start = self.program.bytecode.len();
+                self.program.record_function_name(start, name.clone());
                 self.funcs.push(FuncCtx {
                     locals: params.names().clone(),
                     upvalues: Vec::new(),
@@ -5923,6 +3139,9 @@ impl Compiler {
                     self.program.emit_op(Opcode::NewPromise);
                     self.program.emit_u8(ps);
                 }
+                if *is_generator {
+                    self.program.emit_op(Opcode::CreateGenerator);
+                }
                 let saved_loops = std::mem::take(&mut self.loops);
                 let saved_trys = std::mem::take(&mut self.trys);
                 let saved_finally = std::mem::take(&mut self.finally_locals);
@@ -5939,7 +3158,7 @@ impl Compiler {
                 let ctx = self.funcs.pop().unwrap();
                 self.patch_jump(j);
                 let ci = self.program.add_constant(Value::number(start as f64));
-                // Fixed params only — `names` includes the rest param, but
+                // Fixed params only â€” `names` includes the rest param, but
                 // the rest slot is materialized by MakeRestArray and must not
                 // be pre-filled (see emit_method).
                 let pcount = params.names().len() as u8 - u8::from(params.rest.is_some());
@@ -5968,7 +3187,7 @@ impl Compiler {
                 }
             }
             Stmt::Class { name, extends, methods } => {
-                // `class C extends B { … }` — build the class value in place
+                // `class C extends B { â€¦ }` â€” build the class value in place
                 // (not hoisted, matching JS TDZ semantics), then bind it to
                 // the name.
                 let e = Expr::Class {
@@ -6073,7 +3292,7 @@ impl Compiler {
             }
             Stmt::DoWhile { cond, body } => {
                 // `do body while (cond)`: the body runs first, then the
-                // condition is tested — truthy jumps back to the body,
+                // condition is tested â€” truthy jumps back to the body,
                 // falsy falls out. `continue` inside the body jumps to the
                 // condition, per JS.
                 let ls = self.program.bytecode.len();
@@ -6154,7 +3373,11 @@ impl Compiler {
                 // a local/upvalue instead of a global. The FnDecl emission
                 // reuses the pre-allocated slot via rposition.
                 for st in stmts.iter() {
-                    if let Stmt::FnDecl { name, .. } = st {
+                    let mut s = st;
+                    while let Stmt::Loc { stmt, .. } = s {
+                        s = stmt;
+                    }
+                    if let Stmt::FnDecl { name, .. } = s {
                         if !self.funcs.last().unwrap().locals.contains(name) {
                             self.funcs.last_mut().unwrap().locals.push(name.clone());
                         }
@@ -6170,8 +3393,12 @@ impl Compiler {
             Stmt::BreakLabel(l) => self.emit_loop_exit(true, Some(l))?,
             Stmt::ContinueLabel(l) => self.emit_loop_exit(false, Some(l))?,
             Stmt::Labeled { name, body } => {
+                let mut b = body.as_ref();
+                while let Stmt::Loc { stmt, .. } = b {
+                    b = stmt;
+                }
                 let is_loop = matches!(
-                    body.as_ref(),
+                    b,
                     Stmt::While { .. }
                         | Stmt::For { .. }
                         | Stmt::ForOf { .. }
@@ -6360,7 +3587,7 @@ impl Compiler {
                     // to a property of m. Live bindings: GetPropertyCell
                     // returns the RAW cell (the module's own storage), so
                     // the bound global aliases it and LoadGlobal unwraps to
-                    // the current value on every read — ESM semantics.
+                    // the current value on every read â€” ESM semantics.
                     self.emit_require_call(src)?;
                     for (exported, local) in pairs {
                         self.imported_bindings.insert(local.clone());
@@ -6376,7 +3603,7 @@ impl Compiler {
                 }
                 ImportKind::ModuleNamespace(bind) => {
                     // `import * as m`: m aliases the whole exports object,
-                    // whose properties are the module's cells — reads of
+                    // whose properties are the module's cells â€” reads of
                     // `m.x` are live. Reassigning m is an ESM SyntaxError.
                     self.imported_bindings.insert(bind.clone());
                     let idx = self.resolve_global(bind);
@@ -6414,7 +3641,11 @@ impl Compiler {
                 // under the reserved name, then record the export.
                 if *default {
                     let idx = self.resolve_global(DEFAULT_EXPORT);
-                    if let Stmt::Expr(e) = &**stmt {
+                    let mut s = &**stmt;
+                    while let Stmt::Loc { stmt, .. } = s {
+                        s = stmt;
+                    }
+                    if let Stmt::Expr(e) = s {
                         self.emit_expr(e)?;
                     }
                     self.program.emit_op(Opcode::StoreGlobal);
@@ -6456,7 +3687,7 @@ impl Compiler {
 
         // arr = source (or Object.keys(source) for for-in). A for-of over a
         // Map/Set first converts the container to its iteration snapshot
-        // (entry pairs / elements) — the synthetic iterator — so the index
+        // (entry pairs / elements) â€” the synthetic iterator â€” so the index
         // loop below iterates it like any array.
         self.emit_expr(source)?;
         if is_in {
@@ -6651,7 +3882,11 @@ impl Compiler {
         // would make call sites load an uninitialized slot.)
         if !top_level_globals {
             for s in &ast {
-                if let Stmt::FnDecl { name, .. } = s {
+                let mut st = s;
+                while let Stmt::Loc { stmt, .. } = st {
+                    st = stmt;
+                }
+                if let Stmt::FnDecl { name, .. } = st {
                     if !c.funcs[0].locals.contains(name) {
                         c.funcs[0].locals.push(name.clone());
                     }
@@ -6667,10 +3902,14 @@ impl Compiler {
         }
         // Every export binding must be declared somewhere in the module
         // (Node: "Export 'x' is not defined" at link time). Only checked in
-        // module mode — ordinary scripts already reject `export` entirely.
+        // module mode â€” ordinary scripts already reject `export` entirely.
         if c.in_module {
             for s in &ast {
-                if let Stmt::Export { pairs, .. } = s {
+                let mut st = s;
+                while let Stmt::Loc { stmt, .. } = st {
+                    st = stmt;
+                }
+                if let Stmt::Export { pairs, .. } = st {
                     for (_, binding) in pairs {
                         if binding != DEFAULT_EXPORT
                             && !c.program.globals.contains(binding)
@@ -6837,3 +4076,4 @@ impl Compiler {
         delims.is_empty() && matches!(mode, Mode::Code | Mode::LineComment)
     }
 }
+

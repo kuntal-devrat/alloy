@@ -1,7 +1,21 @@
 [package]
-name = "alloy-core"
+name = "alloy-runtime-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Core primitives, NaN-tagged value representation, memory arena allocator, and zero-copy shared memory segment for the Alloy runtime."
+
+[lib]
+name = "alloy_core"
+
+[lints]
+workspace = true
 
 [dependencies]
 libc.workspace = true

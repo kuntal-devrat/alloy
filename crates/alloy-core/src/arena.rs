@@ -1,25 +1,30 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::ptr::NonNull;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 
 #[derive(Debug)]
 pub struct Arena {
     ptr: NonNull<u8>,
     layout: Layout,
-    offset: AtomicUsize,
+    /// Bump offset. `Cell` (not `AtomicUsize`) because arenas are single-owner:
+    /// allocation is only safe from one thread at a time. `Cell` is `!Sync`,
+    /// so the compiler prevents concurrent `&Arena` access at the type level.
+    /// The `SidecarMemory` segment (which IS shared across threads/processes)
+    /// uses its own `AtomicUsize` for the write cursor — see `shared_memory.rs`.
+    offset: Cell<usize>,
     capacity: usize,
 }
 
-// Arena is Send (ptr ownership transfers) but NOT Sync — Cell/ interior mutability
-// is only safe via &mut or single-threaded & via AtomicUsize for offset.
-// ChunkedArena wraps it behind &mut for most ops; Sidecar's shm uses atomics.
+// SAFETY: Arena is Send so ownership can transfer between threads (e.g. a VM
+// moving to a worker thread). It is intentionally NOT Sync — Cell<usize> is
+// !Sync, enforcing at the type level that concurrent &Arena access is a
+// compile error. All allocation methods take &self (single-threaded bump).
 unsafe impl Send for Arena {}
 
 impl Arena {
     pub fn new(capacity: usize) -> Self {
-        let layout = Layout::array::<u8>(capacity).expect("invalid arena layout");
+        let layout = Layout::from_size_align(capacity, 16).expect("invalid arena layout");
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
@@ -27,16 +32,17 @@ impl Arena {
         Self {
             ptr: NonNull::new(ptr).unwrap(),
             layout,
-            offset: AtomicUsize::new(0),
+            offset: Cell::new(0),
             capacity,
         }
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn alloc<T>(&self, value: T) -> &mut T {
         let size = std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
 
-        let current = self.offset.load(Ordering::Relaxed);
+        let current = self.offset.get();
         let aligned = (current + align - 1) & !(align - 1);
 
         if aligned + size > self.capacity {
@@ -46,7 +52,7 @@ impl Arena {
         }
 
         let ptr = unsafe { self.ptr.as_ptr().add(aligned) as *mut T };
-        self.offset.store(aligned + size, Ordering::Relaxed);
+        self.offset.set(aligned + size);
         unsafe {
             ptr.write(value);
             &mut *ptr
@@ -56,7 +62,7 @@ impl Arena {
     pub fn alloc_bytes(&self, data: &[u8]) -> *mut u8 {
         let size = data.len();
         let align = 8;
-        let current = self.offset.load(Ordering::Relaxed);
+        let current = self.offset.get();
         let aligned = (current + align - 1) & !(align - 1);
 
         if aligned + size > self.capacity {
@@ -68,13 +74,13 @@ impl Arena {
         let ptr = unsafe { self.ptr.as_ptr().add(aligned) };
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, size);
-            self.offset.store(aligned + size, Ordering::Relaxed);
+            self.offset.set(aligned + size);
             ptr
         }
     }
 
     pub fn bump_alloc(&self, size: usize, align: usize) -> *mut u8 {
-        let current = self.offset.load(Ordering::Relaxed);
+        let current = self.offset.get();
         let aligned = (current + align - 1) & !(align - 1);
 
         if aligned + size > self.capacity {
@@ -84,23 +90,23 @@ impl Arena {
         }
 
         let ptr = unsafe { self.ptr.as_ptr().add(aligned) };
-        self.offset.store(aligned + size, Ordering::Relaxed);
+        self.offset.set(aligned + size);
         ptr
     }
 
     pub fn reset(&self) {
-        self.offset.store(0, Ordering::Relaxed);
+        self.offset.set(0);
     }
 
     /// Advance the bump cursor by `n` bytes without writing anything.
     pub fn advance(&self, n: usize) {
-        let current = self.offset.load(Ordering::Relaxed);
+        let current = self.offset.get();
         assert!(current + n <= self.capacity, "arena bump past capacity");
-        self.offset.store(current + n, Ordering::Relaxed);
+        self.offset.set(current + n);
     }
 
     pub fn used(&self) -> usize {
-        self.offset.load(Ordering::Relaxed)
+        self.offset.get()
     }
 
     pub fn capacity(&self) -> usize {
@@ -210,17 +216,17 @@ pub struct ChunkedArena {
 #[inline]
 pub fn class_idx(size: usize) -> usize {
     if size <= 64 {
-        (size + 7) / 8 - 1
+        size.div_ceil(8) - 1
     } else if size <= 256 {
-        8 + (size - 64 + 15) / 16 - 1
+        8 + (size - 64).div_ceil(16) - 1
     } else if size <= 1024 {
-        20 + (size - 256 + 63) / 64 - 1
+        20 + (size - 256).div_ceil(64) - 1
     } else if size <= 4096 {
-        32 + (size - 1024 + 255) / 256 - 1
+        32 + (size - 1024).div_ceil(256) - 1
     } else if size <= 16384 {
-        44 + (size - 4096 + 1023) / 1024 - 1
+        44 + (size - 4096).div_ceil(1024) - 1
     } else {
-        56 + (size - 16384 + 8191) / 8192 - 1
+        56 + (size - 16384).div_ceil(8192) - 1
     }
 }
 
@@ -245,7 +251,7 @@ impl ChunkedArena {
         self.chunks.push(Arena::new(cap));
         self.regions.push(Vec::new());
         // One bit per 8-byte slot: (cap >> 3) slots, 64 per u64 cell.
-        self.dirty.push(vec![Cell::new(0u64); ((cap >> 3) + 63) / 64]);
+        self.dirty.push(vec![Cell::new(0u64); (cap >> 3).div_ceil(64)]);
     }
 
     /// Bump-allocate `value`, returning a pointer that stays valid until the
@@ -404,8 +410,9 @@ impl ChunkedArena {
         None
     }
 
-    /// Find the chunk index and slot of a payload address (the caller must
-    /// have verified the address is inside this arena). Returns None instead of panicking.
+    /// Find the chunk index and slot of a payload address. Returns `None` if
+    /// the address does not belong to any active chunk — callers MUST handle
+    /// the `None` case instead of acting on a stale/bogus address.
     fn try_chunk_of(&self, addr: usize) -> Option<(usize, usize)> {
         for (i, c) in self.chunks.iter().take(self.active + 1).enumerate() {
             let base = c.ptr() as usize;
@@ -419,8 +426,14 @@ impl ChunkedArena {
         match self.try_chunk_of(addr) {
             Some(v) => v,
             None => {
+                // Debug builds: loud crash so the bug is caught immediately.
+                debug_assert!(false, "[alloy] address {:#x} not in any arena chunk — GC would corrupt chunk 0", addr);
+                // Release builds: log and return a sentinel that sweep callers
+                // must check. Using (usize::MAX, 0) so no real chunk index
+                // can match — callers that destructure blindly will
+                // bounds-check fail rather than silently corrupt.
                 eprintln!("[alloy] address not in arena: {:#x}", addr);
-                (0, 0)
+                (usize::MAX, 0)
             }
         }
     }
@@ -519,7 +532,10 @@ impl ChunkedArena {
     /// Bump-allocate `len` raw bytes in this arena (KIND_RAW region) and copy
     /// them from `src`, which may point into any other arena. Reuses swept
     /// space first.
-    pub fn alloc_bytes_from(&mut self, src: *const u8, len: usize) -> *mut u8 {
+    ///
+    /// # Safety
+    /// `src` must be a valid pointer to at least `len` readable bytes.
+    pub unsafe fn alloc_bytes_from(&mut self, src: *const u8, len: usize) -> *mut u8 {
         let p = match self.alloc_free(len, 0) {
             Some(p) => p,
             None => self.alloc_region(len, 0),
@@ -675,8 +691,8 @@ mod tests {
         let arena = Arena::new(1024);
         let x = arena.alloc(42u64);
         assert_eq!(*x, 42);
-        let y = arena.alloc(3.14f64);
-        assert!((*y - 3.14).abs() < f64::EPSILON);
+        let y = arena.alloc(3.5f64);
+        assert!((*y - 3.5).abs() < f64::EPSILON);
     }
 
     #[test]

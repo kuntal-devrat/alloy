@@ -2,9 +2,23 @@
 name = "alloy-rt"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Event loop, actor runtime, asynchronous task scheduling, and I/O primitives for the Alloy runtime."
+
+[lints]
+workspace = true
 
 [dependencies]
-alloy-core = { path = "../alloy-core" }
-alloy-vm = { path = "../alloy-vm" }
+alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.1.0" }
+alloy-vm = { path = "../alloy-vm", version = "0.1.0" }
 tokio.workspace = true
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

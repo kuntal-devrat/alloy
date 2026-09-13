@@ -148,8 +148,11 @@ impl ArenaHeap {
 
     /// Copy `len` bytes from `src` (typically young string bytes) into the old
     /// generation, reusing swept free space first.
+    ///
+    /// # Safety
+    /// `src` must point to at least `len` valid initialized bytes.
     #[inline]
-    pub fn promote_bytes(&mut self, src: *const u8, len: usize) -> *mut u8 {
+    pub unsafe fn promote_bytes(&mut self, src: *const u8, len: usize) -> *mut u8 {
         self.old_alloc += (len + 7) & !7;
         self.old.alloc_bytes_from(src, len)
     }
@@ -176,9 +179,9 @@ impl ArenaHeap {
     /// (via `on_dead`) and coalesce the dead space onto the free list. `live`
     /// is the set of every reachable old payload address (boxes + string
     /// bytes). Live boxes are never moved.
-    pub fn sweep_old(&mut self, live: &HashSet<usize>, mut on_dead: impl FnMut(usize, u64)) {
+    pub fn sweep_old(&mut self, live: &HashSet<usize>, on_dead: impl FnMut(usize, u64)) {
         self.old
-            .sweep_free_list(|addr| live.contains(&addr), |a, k| on_dead(a, k));
+            .sweep_free_list(|addr| live.contains(&addr), on_dead);
     }
 
     /// Walk the old generation and return `(payload_addr, kind)` of every box
@@ -295,7 +298,7 @@ thread_local! {
 pub fn current_heap() -> *mut ArenaHeap {
     let p = CURRENT_HEAP.with(|c| c.get());
     if p.is_null() {
-        THREAD_HEAP.with(|h| h.as_ptr() as *mut ArenaHeap)
+        THREAD_HEAP.with(|h| h.as_ptr())
     } else {
         p
     }
@@ -341,14 +344,14 @@ mod tests {
         let mut a = ArenaHeap::new(64);
         let mut b = ArenaHeap::new(64);
         let g1 = HeapGuard::set(&mut a);
-        assert!(std::ptr::eq(current_heap(), &mut a));
+        assert!(std::ptr::eq(current_heap(), &a));
         let g2 = HeapGuard::set(&mut b);
-        assert!(std::ptr::eq(current_heap(), &mut b));
+        assert!(std::ptr::eq(current_heap(), &b));
         drop(g2);
-        assert!(std::ptr::eq(current_heap(), &mut a));
+        assert!(std::ptr::eq(current_heap(), &a));
         drop(g1);
         // Outside any guard: the thread fallback heap.
-        assert!(std::ptr::eq(current_heap(), THREAD_HEAP.with(|h| h.as_ptr() as *mut ArenaHeap)));
+        assert!(std::ptr::eq(current_heap(), THREAD_HEAP.with(|h| h.as_ptr())));
     }
 
     #[test]

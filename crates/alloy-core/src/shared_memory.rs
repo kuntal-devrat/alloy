@@ -273,13 +273,18 @@ fn map_file(file: &std::fs::File, capacity: usize) -> Result<*mut u8, String> {
     use windows_sys::Win32::System::Memory::{
         CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
     };
+    // Pass both dwords of capacity: the high 32 bits go in dwMaximumSizeHigh,
+    // the low 32 bits in dwMaximumSizeLow. Without this, segments > 4 GB
+    // would silently truncate.
+    let size_high = (capacity as u64 >> 32) as u32;
+    let size_low = capacity as u32;
     let mapping = unsafe {
         CreateFileMappingW(
             file.as_raw_handle(),
             std::ptr::null(),
             PAGE_READWRITE,
-            0,
-            capacity as u32,
+            size_high,
+            size_low,
             std::ptr::null(),
         )
     };
@@ -343,7 +348,7 @@ impl SidecarMemory {
                 };
             }
         }
-        let layout = std::alloc::Layout::array::<u8>(capacity)
+        let layout = std::alloc::Layout::from_size_align(capacity, 16)
             .expect("invalid shared memory layout");
         let ptr = unsafe { std::alloc::alloc(layout) };
         if ptr.is_null() {
@@ -405,11 +410,20 @@ impl SidecarMemory {
         }
     }
 
-    pub fn read_mut(&self, offset: usize, len: usize) -> Result<&mut [u8], SharedMemoryError> {
+    /// Mutable read into the shared segment.
+    ///
+    /// Takes `&mut self` (not `&self`) to prevent overlapping mutable
+    /// references: Rust's aliasing rules require exclusive access for
+    /// `&mut [u8]`, so the borrow checker enforces that no other reference
+    /// into the segment is live while this slice exists.
+    pub fn read_mut(&mut self, offset: usize, len: usize) -> Result<&mut [u8], SharedMemoryError> {
         if offset + len > self.capacity {
             return Err(SharedMemoryError::OutOfBounds { offset, len });
         }
 
+        // SAFETY: `&mut self` guarantees exclusive access. The bounds check
+        // above ensures `offset + len <= capacity`, so the pointer arithmetic
+        // stays within the mapped region.
         unsafe {
             let ptr = self.ptr.as_ptr().add(offset);
             Ok(std::slice::from_raw_parts_mut(ptr, len))
@@ -436,7 +450,7 @@ impl SidecarMemory {
     }
 
     pub fn allocate_float32_array(&self, values: &[f32]) -> Result<usize, SharedMemoryError> {
-        let byte_len = values.len() * std::mem::size_of::<f32>();
+        let byte_len = std::mem::size_of_val(values);
         loop {
             let offset = self.write_offset.load(Ordering::Acquire);
             let aligned = (offset + 3) & !3;
@@ -460,7 +474,7 @@ impl SidecarMemory {
 
     /// Generic typed-array allocation shared by the f32/f64/i32 entry points.
     fn allocate_typed<T>(&self, values: &[T]) -> Result<usize, SharedMemoryError> {
-        let byte_len = values.len() * std::mem::size_of::<T>();
+        let byte_len = std::mem::size_of_val(values);
         let align = std::mem::align_of::<T>().max(4);
         loop {
             let offset = self.write_offset.load(Ordering::Acquire);
@@ -486,7 +500,7 @@ impl SidecarMemory {
     /// Generic typed-slice read with alignment + bounds validation.
     fn get_typed_slice<T>(&self, offset: usize, count: usize) -> Result<&[T], SharedMemoryError> {
         let byte_len = count * std::mem::size_of::<T>();
-        if offset % std::mem::align_of::<T>() != 0 {
+        if !offset.is_multiple_of(std::mem::align_of::<T>()) {
             return Err(SharedMemoryError::Unaligned { offset });
         }
         if offset + byte_len > self.capacity {
@@ -506,10 +520,10 @@ impl SidecarMemory {
         self.allocate_typed(values)
     }
 
-    /// Mutable typed view (used by the scalar write helpers).
-    fn get_typed_slice_mut<T>(&self, offset: usize, count: usize) -> Result<&mut [T], SharedMemoryError> {
-        let byte_len = count * std::mem::size_of::<T>();
-        if offset % std::mem::align_of::<T>() != 0 {
+    /// Write a scalar value directly through the shared pointer.
+    fn write_typed<T: Copy>(&self, offset: usize, v: T) -> Result<(), SharedMemoryError> {
+        let byte_len = std::mem::size_of::<T>();
+        if !offset.is_multiple_of(std::mem::align_of::<T>()) {
             return Err(SharedMemoryError::Unaligned { offset });
         }
         if offset + byte_len > self.capacity {
@@ -517,8 +531,9 @@ impl SidecarMemory {
         }
         unsafe {
             let ptr = self.ptr.as_ptr().add(offset) as *mut T;
-            Ok(std::slice::from_raw_parts_mut(ptr, count))
+            std::ptr::write(ptr, v);
         }
+        Ok(())
     }
 
     pub fn get_float64_slice(&self, offset: usize, count: usize) -> Result<&[f64], SharedMemoryError> {
@@ -554,21 +569,15 @@ impl SidecarMemory {
     }
 
     pub fn write_float32(&self, offset: usize, v: f32) -> Result<(), SharedMemoryError> {
-        let s = self.get_typed_slice_mut::<f32>(offset, 1)?;
-        s[0] = v;
-        Ok(())
+        self.write_typed(offset, v)
     }
 
     pub fn write_float64(&self, offset: usize, v: f64) -> Result<(), SharedMemoryError> {
-        let s = self.get_typed_slice_mut::<f64>(offset, 1)?;
-        s[0] = v;
-        Ok(())
+        self.write_typed(offset, v)
     }
 
     pub fn write_int32(&self, offset: usize, v: i32) -> Result<(), SharedMemoryError> {
-        let s = self.get_typed_slice_mut::<i32>(offset, 1)?;
-        s[0] = v;
-        Ok(())
+        self.write_typed(offset, v)
     }
 
     pub fn write_uint8(&self, offset: usize, v: u8) -> Result<(), SharedMemoryError> {
@@ -583,7 +592,7 @@ impl SidecarMemory {
 
     pub fn get_float32_slice(&self, offset: usize, count: usize) -> Result<&[f32], SharedMemoryError> {
         let byte_len = count * std::mem::size_of::<f32>();
-        if offset % std::mem::align_of::<f32>() != 0 {
+        if !offset.is_multiple_of(std::mem::align_of::<f32>()) {
             return Err(SharedMemoryError::Unaligned { offset });
         }
         if offset + byte_len > self.capacity {
@@ -662,7 +671,7 @@ impl Drop for SidecarMemory {
                 }
             }
             None => {
-                let layout = std::alloc::Layout::array::<u8>(self.capacity).unwrap();
+                let layout = std::alloc::Layout::from_size_align(self.capacity, 16).unwrap();
                 unsafe {
                     std::alloc::dealloc(self.ptr.as_ptr(), layout);
                 }
@@ -815,7 +824,7 @@ mod tests {
     fn test_sidecar_zero_copy_scalar_views() {
         let mem = SidecarMemory::new(4096);
         // JS side: allocate a Float64Array and write through its slice.
-        let vals = vec![3.14159f64, 2.71828, 1.0];
+        let vals = vec![1.2345f64, 2.3456, 1.0];
         let off = mem.allocate_float64_array(&vals).unwrap();
         let js_view = mem.get_float64_slice(off, 3).unwrap();
         assert_eq!(js_view, &vals[..]);
@@ -828,7 +837,7 @@ mod tests {
         mem.write_float64(off + 8, 42.0).unwrap();
         // Sidecar reads the same byte region with a raw scalar view.
         assert_eq!(mem.read_float64(off + 8).unwrap(), 42.0);
-        assert_eq!(mem.read_float64(off).unwrap(), 3.14159);
+        assert_eq!(mem.read_float64(off).unwrap(), 1.2345);
         // i32 + u8 scalar round-trips.
         mem.write_int32(off, -12345).unwrap();
         assert_eq!(mem.read_int32(off).unwrap(), -12345);

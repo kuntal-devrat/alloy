@@ -1,0 +1,161 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Alloy",
+  "scopeName": "source.alloy",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#builtins" },
+    { "include": "#identifiers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.alloy",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.alloy",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.alloy",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.alloy", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.quoted.single.alloy",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            { "name": "constant.character.escape.alloy", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.template.alloy",
+          "begin": "`",
+          "end": "`",
+          "patterns": [
+            { "name": "constant.character.escape.alloy", "match": "\\\\." },
+            {
+              "name": "meta.embedded.line.alloy",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.alloy" } },
+              "endCaptures": { "0": { "name": "punctuation.definition.template-expression.end.alloy" } },
+              "patterns": [{ "include": "$self" }]
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.alloy",
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.alloy",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.alloy",
+          "match": "\\b0[oO][0-7_]+\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.alloy",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9_]+)?([eE][+-]?[0-9_]+)?\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.alloy",
+          "match": "\\b(if|else|switch|case|default|for|while|do|break|continue|return|try|catch|finally|throw|yield|await)\\b"
+        },
+        {
+          "name": "keyword.declaration.alloy",
+          "match": "\\b(const|let|var|function|class|extends|static|import|export|from|as)\\b"
+        },
+        {
+          "name": "keyword.other.alloy",
+          "match": "\\b(async|channel|spawn|new|delete|typeof|instanceof|in|void|debugger|super|this)\\b"
+        },
+        {
+          "name": "constant.language.alloy",
+          "match": "\\b(true|false|null|undefined|NaN|Infinity)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.class.alloy",
+          "match": "\\b(Array|Object|String|Number|Boolean|Symbol|Promise|Map|Set|Error|TypeError|RangeError|SyntaxError|ReferenceError|URL)\\b"
+        },
+        {
+          "name": "support.constant.alloy",
+          "match": "\\b(Math|JSON|Reflect|Proxy|crypto|http|memory|fs)\\b"
+        },
+        {
+          "name": "support.function.alloy",
+          "match": "\\b(print|fetchSync|structuredClone|parseInt|parseFloat|encodeURIComponent|decodeURIComponent|btoa|atob)\\b"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.private.alloy",
+          "match": "#[a-zA-Z_$][a-zA-Z0-9_$]*"
+        },
+        {
+          "name": "entity.name.function.alloy",
+          "match": "\\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\\s*\\()"
+        },
+        {
+          "name": "variable.other.readwrite.alloy",
+          "match": "\\b[a-zA-Z_$][a-zA-Z0-9_$]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arithmetic.alloy",
+          "match": "\\+|-|\\*|/|%|\\*\\*|\\+\\+|--"
+        },
+        {
+          "name": "keyword.operator.comparison.alloy",
+          "match": "===|!==|==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.alloy",
+          "match": "&&|\\|\\||!|\\?\\?"
+        },
+        {
+          "name": "keyword.operator.assignment.alloy",
+          "match": "=|\\+=|-=|\\*=|/=|%=|\\*\\*=|&&=|\\|\\|=|\\?\\?="
+        },
+        {
+          "name": "keyword.operator.bitwise.alloy",
+          "match": "&|\\||\\^|~|<<|>>|>>>"
+        }
+      ]
+    }
+  }
+}

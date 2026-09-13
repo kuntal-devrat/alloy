@@ -698,7 +698,7 @@ fn match_at(
     prog: &RegexCompiled,
     chars: &[char],
     start: usize,
-) -> Option<(usize, Vec<Option<(usize, usize)>>)> {
+) -> Result<Option<(usize, Vec<Option<(usize, usize)>>)>, RegexExecError> {
     let n = prog.n_captures;
     let mut stack: Vec<Thread> = Vec::new();
     stack.push(Thread {
@@ -712,7 +712,7 @@ fn match_at(
     while let Some(Thread { pc, pos, caps }) = stack.pop() {
         steps += 1;
         if steps > MAX_STEPS {
-            return None; // treat as no match rather than hanging
+            return Err(RegexExecError::TooComplex);
         }
         let Some(inst) = prog.code.get(pc) else { continue };
         let ic = prog.flags.ignore_case;
@@ -852,11 +852,11 @@ fn match_at(
                 }
             }
             Inst::Match => {
-                return Some((pos, group_ranges(&caps, prog.n_captures)))
+                return Ok(Some((pos, group_ranges(&caps, prog.n_captures))));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 fn char_eq(a: char, b: char, ignore_case: bool) -> bool {
@@ -867,7 +867,23 @@ fn char_eq(a: char, b: char, ignore_case: bool) -> bool {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegexExecError {
+    TooComplex,
+}
+
+impl std::fmt::Display for RegexExecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegexExecError::TooComplex => write!(f, "regular expression too complex"),
+        }
+    }
+}
+
+impl std::error::Error for RegexExecError {}
+
 /// Result of one exec/search: (start, end, captures) in char positions.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
     pub start: usize,
     pub end: usize,
@@ -876,21 +892,23 @@ pub struct Match {
 
 /// Find the first match at or after `start` (char index). When `sticky` is
 /// set, only `start` itself is tried.
-pub fn search(prog: &RegexCompiled, chars: &[char], start: usize) -> Option<Match> {
+pub fn search(prog: &RegexCompiled, chars: &[char], start: usize) -> Result<Option<Match>, RegexExecError> {
     let start = start.min(chars.len());
     if prog.flags.sticky {
-        return match_at(prog, chars, start).map(|(end, caps)| Match {
-            start,
-            end,
-            caps,
+        return match_at(prog, chars, start).map(|opt| {
+            opt.map(|(end, caps)| Match {
+                start,
+                end,
+                caps,
+            })
         });
     }
     for s in start..=chars.len() {
-        if let Some((end, caps)) = match_at(prog, chars, s) {
-            return Some(Match { start: s, end, caps });
+        if let Some((end, caps)) = match_at(prog, chars, s)? {
+            return Ok(Some(Match { start: s, end, caps }));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Convert a char position to a UTF-16 code-unit offset (V8's `.index` /
@@ -908,11 +926,11 @@ pub fn char_pos_to_utf16(chars: &[char], pos: usize) -> usize {
 pub fn scan_all(
     prog: &RegexCompiled,
     chars: &[char],
-) -> Vec<(usize, usize, Vec<Option<(usize, usize)>>)> {
+) -> Result<Vec<(usize, usize, Vec<Option<(usize, usize)>>)>, RegexExecError> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos <= chars.len() {
-        match search(prog, chars, pos) {
+        match search(prog, chars, pos)? {
             Some(m) => {
                 out.push((m.start, m.end, m.caps));
                 if m.end > m.start {
@@ -924,7 +942,7 @@ pub fn scan_all(
             None => break,
         }
     }
-    out
+    Ok(out)
 }
 
 /// Convenience for the VM: build a compiled regex from pattern+flags text,
@@ -942,13 +960,13 @@ mod tests {
     fn m(pattern: &str, hay: &str) -> Option<(usize, usize)> {
         let prog = compile_from_str(pattern, "").expect("compile");
         let chars: Vec<char> = hay.chars().collect();
-        search(&prog, &chars, 0).map(|m| (m.start, m.end))
+        search(&prog, &chars, 0).unwrap().map(|m| (m.start, m.end))
     }
 
     fn caps(pattern: &str, hay: &str) -> Vec<Option<(usize, usize)>> {
         let prog = compile_from_str(pattern, "").expect("compile");
         let chars: Vec<char> = hay.chars().collect();
-        search(&prog, &chars, 0).map(|m| m.caps).unwrap()
+        search(&prog, &chars, 0).unwrap().map(|m| m.caps).unwrap()
     }
 
     #[test]
@@ -1016,24 +1034,24 @@ mod tests {
     fn flags() {
         let p = compile_from_str("abc", "i").unwrap();
         let chars: Vec<char> = "ABC".chars().collect();
-        assert!(search(&p, &chars, 0).is_some());
+        assert!(search(&p, &chars, 0).unwrap().is_some());
         let p = compile_from_str("^a", "m").unwrap();
         let chars: Vec<char> = "x\na".chars().collect();
-        assert_eq!(search(&p, &chars, 0).map(|m| m.start), Some(2));
+        assert_eq!(search(&p, &chars, 0).unwrap().map(|m| m.start), Some(2));
         let p = compile_from_str("a.c", "s").unwrap();
         let chars: Vec<char> = "a\nc".chars().collect();
-        assert!(search(&p, &chars, 0).is_some());
+        assert!(search(&p, &chars, 0).unwrap().is_some());
         let p = compile_from_str("b", "y").unwrap();
         let chars: Vec<char> = "abc".chars().collect();
-        assert!(search(&p, &chars, 0).is_none());
-        assert!(search(&p, &chars, 1).is_some());
+        assert!(search(&p, &chars, 0).unwrap().is_none());
+        assert!(search(&p, &chars, 1).unwrap().is_some());
     }
 
     #[test]
     fn scan_and_errors() {
         let p = compile_from_str("\\d+", "g").unwrap();
         let chars: Vec<char> = "a12b34".chars().collect();
-        let all = scan_all(&p, &chars);
+        let all = scan_all(&p, &chars).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!((all[0].0, all[0].1), (1, 3));
         assert_eq!((all[1].0, all[1].1), (4, 6));
@@ -1044,6 +1062,15 @@ mod tests {
         assert!(compile_from_str("\\1", "").is_err());
         assert!(compile_from_str("[a-", "").is_err());
         assert!(compile_from_str("a", "zz").is_err());
-        assert!(compile_from_str("a", "gg").is_err());        assert!(compile_from_str("(?=a)", "").is_err());
+        assert!(compile_from_str("a", "gg").is_err());
+        assert!(compile_from_str("(?=a)", "").is_err());
+    }
+
+    #[test]
+    fn backtracking_guard() {
+        let p = compile_from_str("(a+)+b", "").unwrap();
+        let hay: Vec<char> = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".chars().collect();
+        let res = search(&p, &hay, 0);
+        assert_eq!(res, Err(RegexExecError::TooComplex));
     }
 }

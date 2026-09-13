@@ -125,7 +125,8 @@ fn jump_target_offset(op: Opcode) -> Option<usize> {
         | Opcode::JumpIfTruePop
         | Opcode::JumpIfNullish
         | Opcode::TryStart => Some(1),
-        Opcode::CmpLocalLocalJumpIfFalsePop => Some(4),
+        Opcode::CmpLocalLocalJumpIfFalsePop
+        | Opcode::CmpLocalLocalJumpIfFalse => Some(4),
         Opcode::LoadIndexCmpLocalJumpIfFalsePop => Some(5),
         Opcode::CmpLocalIntJumpIfFalsePop => Some(7),
         Opcode::ArithLocalIntCmpJumpIfFalsePop => Some(12),
@@ -276,6 +277,7 @@ pub(crate) fn op_len(src: &[u8], offset: usize) -> usize {
         Opcode::AllocShared
         | Opcode::MakeRestArray
         | Opcode::AppendStringPop
+        | Opcode::StoreLocalLocal
         | Opcode::LoadLocalLocalGetIndex => 3,
         // op + u8 + u8 + u8
         Opcode::BinLocalLocal
@@ -288,7 +290,8 @@ pub(crate) fn op_len(src: &[u8], offset: usize) -> usize {
         | Opcode::AppendStringLocal
         | Opcode::LoadLocalGetPropConst => 4,
         // op + u16 + u16
-        Opcode::MakeArraySpread => 5,
+        Opcode::MakeArraySpread
+        | Opcode::BinLocalLocalLocalArith => 5,
         // op + u8 + u16 (spread-call: argc byte then a spread mask)
         Opcode::CallSpread
         | Opcode::CallSpreadKeep0
@@ -318,7 +321,9 @@ pub(crate) fn op_len(src: &[u8], offset: usize) -> usize {
         // comparison chains: op + 2 operand pairs + 2 cmp bytes
         Opcode::CmpAndLocalLocal => 7,
         // condition fusions: operands + cmp + u32 jump target
-        Opcode::CmpLocalLocalJumpIfFalsePop => 8,
+        Opcode::CmpLocalLocalJumpIfFalsePop
+        | Opcode::CmpLocalLocalJumpIfFalse
+        | Opcode::BinLocalLocalLocalInt => 8,
         Opcode::LoadIndexCmpLocalJumpIfFalsePop => 9,
         Opcode::CmpLocalIntJumpIfFalsePop => 11,
         Opcode::SetIndexLocalPlusIntLocalGetLocal => 10,
@@ -368,6 +373,9 @@ pub struct Program {
     /// x` is `("x", "x")`; `export default e` is `("default", "\0default")`.
     /// Empty for ordinary scripts.
     pub exports: Vec<(String, String)>,
+    pub line_table: Vec<(usize, u32, u32)>,
+    pub source_file: Option<String>,
+    pub function_names: HashMap<usize, String>,
     /// True when the program was compiled as a module (`compile_module`):
     /// top-level declarations are globals and `exports` may be non-empty.
     /// `require` refuses to load non-module `.ax` files (they would resolve
@@ -395,11 +403,45 @@ impl Program {
             sources: Vec::new(),
             globals: Vec::new(),
             exports: Vec::new(),
+            line_table: Vec::new(),
+            source_file: None,
+            function_names: HashMap::new(),
             is_module: false,
             heap: ArenaHeap::new(1 << 16),
             intern: HashMap::new(),
             intern_bits: HashMap::new(),
             peephole_counts: HashMap::new(),
+        }
+    }
+
+    pub fn record_function_name(&mut self, entry_pc: usize, name: String) {
+        self.function_names.insert(entry_pc, name);
+    }
+
+    pub fn function_name_at(&self, entry_pc: usize) -> Option<&str> {
+        self.function_names.get(&entry_pc).map(|s| s.as_str())
+    }
+
+    pub fn record_location(&mut self, line: u32, col: u32) {
+        let pc = self.bytecode.len();
+        if let Some(last) = self.line_table.last_mut() {
+            if last.0 == pc {
+                last.1 = line;
+                last.2 = col;
+                return;
+            }
+        }
+        self.line_table.push((pc, line, col));
+    }
+
+    pub fn get_location(&self, pc: usize) -> Option<(u32, u32)> {
+        if self.line_table.is_empty() {
+            return None;
+        }
+        match self.line_table.binary_search_by_key(&pc, |&(p, _, _)| p) {
+            Ok(idx) => Some((self.line_table[idx].1, self.line_table[idx].2)),
+            Err(0) => Some((self.line_table[0].1, self.line_table[0].2)),
+            Err(idx) => Some((self.line_table[idx - 1].1, self.line_table[idx - 1].2)),
         }
     }
 
@@ -576,6 +618,73 @@ impl Program {
                 }
             }
 
+            // LoadLocal + LoadLocal + AR + StoreLocal -> BinLocalLocalLocalArith (`r{dst} = r{src1} ar r{src2}`).
+            if op == Opcode::LoadLocal
+                && i + 7 <= n
+                && src[i + 2] == Opcode::LoadLocal as u8
+                && arith_code_of(src[i + 4]).is_some()
+                && src[i + 5] == Opcode::StoreLocal as u8
+                && !targets.contains(&(i + 2))
+                && !targets.contains(&(i + 4))
+                && !targets.contains(&(i + 5))
+            {
+                let src1 = src[i + 1];
+                let src2 = src[i + 3];
+                let ar = arith_code_of(src[i + 4]).unwrap();
+                let dst = src[i + 6];
+                out.push(Opcode::BinLocalLocalLocalArith as u8);
+                out.push(dst);
+                out.push(src1);
+                out.push(src2);
+                out.push(ar);
+                last = Some((Opcode::BinLocalLocalLocalArith, None));
+                self.count("BinLocalLocalLocalArith");
+                i += 7;
+                continue;
+            }
+
+            // LoadLocal + LoadInt + AR + StoreLocal -> BinLocalLocalLocalInt (`r{dst} = r{src} ar imm`).
+            if op == Opcode::LoadLocal
+                && i + 10 <= n
+                && src[i + 2] == Opcode::LoadInt as u8
+                && arith_code_of(src[i + 7]).is_some()
+                && src[i + 8] == Opcode::StoreLocal as u8
+                && !targets.contains(&(i + 2))
+                && !targets.contains(&(i + 7))
+                && !targets.contains(&(i + 8))
+            {
+                let src_slot = src[i + 1];
+                let imm = rd_i32(&src, i + 3);
+                let ar = arith_code_of(src[i + 7]).unwrap();
+                let dst_slot = src[i + 9];
+                out.push(Opcode::BinLocalLocalLocalInt as u8);
+                out.push(dst_slot);
+                out.push(src_slot);
+                out.push(ar);
+                out.extend_from_slice(&imm.to_be_bytes());
+                last = Some((Opcode::BinLocalLocalLocalInt, None));
+                self.count("BinLocalLocalLocalInt");
+                i += 10;
+                continue;
+            }
+
+            // LoadLocal + StoreLocal -> StoreLocalLocal (`r{dst} = r{src}`).
+            if op == Opcode::LoadLocal
+                && i + 4 <= n
+                && src[i + 2] == Opcode::StoreLocal as u8
+                && !targets.contains(&(i + 2))
+            {
+                let src_slot = src[i + 1];
+                let dst_slot = src[i + 3];
+                out.push(Opcode::StoreLocalLocal as u8);
+                out.push(dst_slot);
+                out.push(src_slot);
+                last = Some((Opcode::StoreLocalLocal, None));
+                self.count("StoreLocalLocal");
+                i += 4;
+                continue;
+            }
+
             // LoadLocal + LoadInt + AR -> BinLocalInt (`(x) * 3`).
             if op == Opcode::LoadLocal
                 && i + 8 <= n
@@ -622,6 +731,50 @@ impl Program {
                     i += 5 + pop as usize;
                     continue;
                 }
+            }
+
+            // BinLocalLocal + StoreLocal -> BinLocalLocalLocalArith
+            if op == Opcode::BinLocalLocal
+                && i + 6 <= n
+                && (src[i + 3] & 0x80 == 0) // keep == true
+                && src[i + 4] == Opcode::StoreLocal as u8
+                && !targets.contains(&(i + 4))
+            {
+                let src1 = src[i + 1];
+                let src2 = src[i + 2];
+                let ar = src[i + 3] & 0x7F;
+                let dst = src[i + 5];
+                out.push(Opcode::BinLocalLocalLocalArith as u8);
+                out.push(dst);
+                out.push(src1);
+                out.push(src2);
+                out.push(ar);
+                last = Some((Opcode::BinLocalLocalLocalArith, None));
+                self.count("BinLocalLocalLocalArith");
+                i += 6;
+                continue;
+            }
+
+            // BinLocalInt + StoreLocal -> BinLocalLocalLocalInt
+            if op == Opcode::BinLocalInt
+                && i + 9 <= n
+                && (src[i + 6] & 0x80 == 0) // keep == true
+                && src[i + 7] == Opcode::StoreLocal as u8
+                && !targets.contains(&(i + 7))
+            {
+                let src_slot = src[i + 1];
+                let imm = rd_i32(&src, i + 2);
+                let ar = src[i + 6] & 0x7F;
+                let dst = src[i + 8];
+                out.push(Opcode::BinLocalLocalLocalInt as u8);
+                out.push(dst);
+                out.push(src_slot);
+                out.push(ar);
+                out.extend_from_slice(&imm.to_be_bytes());
+                last = Some((Opcode::BinLocalLocalLocalInt, None));
+                self.count("BinLocalLocalLocalInt");
+                i += 9;
+                continue;
             }
 
             // BinLocalLocal + LoadInt + AR -> BinLocalLocalInt (`(i + j) % 7`).
@@ -772,6 +925,7 @@ impl Program {
                 i += 9;
                 continue;
             }
+
             // [LoadLocalLocalGetIndex][LoadLocal][Cmp][JIF_POP] ->
             // LoadIndexCmpLocalJumpIfFalsePop. The `a[j] > key` condition
             // shape: read arr[j], compare with a local, branch.
@@ -1037,6 +1191,23 @@ impl Program {
             self.exports.iter().map(|(_, b)| b.clone()).collect();
         write_str_list(&mut out, &export_names)?;
         write_str_list(&mut out, &binding_names)?;
+        out.extend_from_slice(&(self.line_table.len() as u32).to_be_bytes());
+        for &(pc, line, col) in &self.line_table {
+            out.extend_from_slice(&(pc as u32).to_be_bytes());
+            out.extend_from_slice(&line.to_be_bytes());
+            out.extend_from_slice(&col.to_be_bytes());
+        }
+        if let Some(ref sf) = self.source_file {
+            out.push(1);
+            write_str(&mut out, sf);
+        } else {
+            out.push(0);
+        }
+        out.extend_from_slice(&(self.function_names.len() as u32).to_be_bytes());
+        for (&pc, name) in &self.function_names {
+            out.extend_from_slice(&(pc as u32).to_be_bytes());
+            write_str(&mut out, name);
+        }
         Ok(out)
     }
 
@@ -1081,6 +1252,26 @@ impl Program {
             .into_iter()
             .zip(binding_names)
             .collect::<Vec<_>>();
+        if r.pos < r.data.len() {
+            let line_count = r.u32()? as usize;
+            for _ in 0..line_count {
+                let pc = r.u32()? as usize;
+                let line = r.u32()?;
+                let col = r.u32()?;
+                program.line_table.push((pc, line, col));
+            }
+            if r.pos < r.data.len() && r.u8()? != 0 {
+                program.source_file = Some(r.str()?);
+            }
+            if r.pos < r.data.len() {
+                let fn_count = r.u32()? as usize;
+                for _ in 0..fn_count {
+                    let pc = r.u32()? as usize;
+                    let name = r.str()?;
+                    program.function_names.insert(pc, name);
+                }
+            }
+        }
         Ok(program)
     }
 
@@ -1591,6 +1782,36 @@ impl Program {
                 Opcode::Print => {
                     offset += 1;
                 }
+                Opcode::BinLocalLocalLocalArith => {
+                    let dst = self.bytecode[offset + 1];
+                    let s1 = self.bytecode[offset + 2];
+                    let s2 = self.bytecode[offset + 3];
+                    let ar = self.bytecode[offset + 4];
+                    println!("  r{} = r{} ar={} r{}", dst, s1, ar, s2);
+                    offset += 5;
+                }
+                Opcode::BinLocalLocalLocalInt => {
+                    let dst = self.bytecode[offset + 1];
+                    let src = self.bytecode[offset + 2];
+                    let ar = self.bytecode[offset + 3];
+                    let imm = self.read_u32(offset + 4) as i32;
+                    println!("  r{} = r{} ar={} {}", dst, src, ar, imm);
+                    offset += 8;
+                }
+                Opcode::StoreLocalLocal => {
+                    let dst = self.bytecode[offset + 1];
+                    let src = self.bytecode[offset + 2];
+                    println!("  r{} = r{}", dst, src);
+                    offset += 3;
+                }
+                Opcode::CmpLocalLocalJumpIfFalse => {
+                    let a = self.bytecode[offset + 1];
+                    let b = self.bytecode[offset + 2];
+                    let cmp = self.bytecode[offset + 3];
+                    let target = self.read_u32(offset + 4);
+                    println!("  r{} cmp r{} cmp={} jmp_false={}", a, b, cmp, target);
+                    offset += 8;
+                }
                 Opcode::Halt => {
                     println!();
                     offset += 1;
@@ -1735,7 +1956,7 @@ impl<'a> Reader<'a> {
 
     fn str_list(&mut self) -> Result<Vec<String>, SerError> {
         let count = self.u32()? as usize;
-        let mut list = Vec::with_capacity(count);
+        let mut list = Vec::with_capacity(count.min(1024));
         for _ in 0..count {
             list.push(self.str()?);
         }
@@ -1768,7 +1989,7 @@ impl<'a> Reader<'a> {
             }
             7 => {
                 let count = self.u32()? as usize;
-                let mut arr = Vec::with_capacity(count);
+                let mut arr = Vec::with_capacity(count.min(1024));
                 for _ in 0..count {
                     arr.push(self.value()?);
                 }
@@ -1776,7 +1997,7 @@ impl<'a> Reader<'a> {
             }
             8 => {
                 let count = self.u32()? as usize;
-                let mut m = hashbrown::HashMap::with_capacity_and_hasher(count, Default::default());
+                let mut m = hashbrown::HashMap::with_capacity_and_hasher(count.min(1024), Default::default());
                 for _ in 0..count {
                     let k = self.str()?;
                     let v = self.value()?;

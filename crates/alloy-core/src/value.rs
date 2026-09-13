@@ -47,6 +47,66 @@ const S_FALSE: u64 = 2;
 const S_TRUE: u64 = 3;
 const S_SYMBOL: u64 = 4;
 
+pub const SYMBOL_ITERATOR: u64 = 1;
+pub const SYMBOL_TO_STRING_TAG: u64 = 2;
+pub const SYMBOL_HAS_INSTANCE: u64 = 3;
+pub const SYMBOL_TO_PRIMITIVE: u64 = 4;
+pub const SYMBOL_IS_CONCAT_SPREADABLE: u64 = 5;
+pub const SYMBOL_SPECIES: u64 = 6;
+pub const SYMBOL_ASYNC_ITERATOR: u64 = 7;
+
+static SYMBOL_DESCS: std::sync::OnceLock<std::sync::Mutex<hashbrown::HashMap<u64, String>>> = std::sync::OnceLock::new();
+static SYMBOL_FOR_REGISTRY: std::sync::OnceLock<std::sync::Mutex<hashbrown::HashMap<String, u64>>> = std::sync::OnceLock::new();
+static NEXT_SYMBOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100);
+
+pub fn symbol_new(desc: Option<&str>) -> Value {
+    let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some(d) = desc {
+        let mut map = SYMBOL_DESCS.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+        map.insert(id, d.to_string());
+    }
+    Value::symbol(id)
+}
+
+pub fn symbol_for(key: &str) -> Value {
+    let mut reg = SYMBOL_FOR_REGISTRY.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+    if let Some(&id) = reg.get(key) {
+        return Value::symbol(id);
+    }
+    let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    reg.insert(key.to_string(), id);
+    let mut descs = SYMBOL_DESCS.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+    descs.insert(id, key.to_string());
+    Value::symbol(id)
+}
+
+pub fn symbol_key_for(sym: &Value) -> Option<String> {
+    let id = sym.as_symbol()?;
+    let reg = SYMBOL_FOR_REGISTRY.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+    for (k, &v) in reg.iter() {
+        if v == id {
+            return Some(k.clone());
+        }
+    }
+    None
+}
+
+pub fn symbol_description(id: u64) -> Option<String> {
+    match id {
+        SYMBOL_ITERATOR => Some("Symbol.iterator".to_string()),
+        SYMBOL_TO_STRING_TAG => Some("Symbol.toStringTag".to_string()),
+        SYMBOL_HAS_INSTANCE => Some("Symbol.hasInstance".to_string()),
+        SYMBOL_TO_PRIMITIVE => Some("Symbol.toPrimitive".to_string()),
+        SYMBOL_IS_CONCAT_SPREADABLE => Some("Symbol.isConcatSpreadable".to_string()),
+        SYMBOL_SPECIES => Some("Symbol.species".to_string()),
+        SYMBOL_ASYNC_ITERATOR => Some("Symbol.asyncIterator".to_string()),
+        _ => {
+            let map = SYMBOL_DESCS.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+            map.get(&id).cloned()
+        }
+    }
+}
+
 /// Canonical quiet NaN (a positive NaN, safe from the tag space).
 const CANON_NAN: u64 = 0x7FF8_0000_0000_0000;
 
@@ -96,23 +156,56 @@ fn own_rc<T>(rc: Rc<T>) -> u64 {
 ///   — old boxes must keep their prefix). Doubling growth makes appends
 ///   amortized O(1), and the final string is already contiguous: reading it
 ///   needs no flatten.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StringKind {
+    Flat = 0,
+    Cons = 1,
+    Builder = 2,
+}
+
 #[repr(C)]
 pub struct AString {
-    bytes: *mut u8,
-    len: usize,
+    pub kind: u8,
+    pub _pad: [u8; 3],
+    pub atom: std::sync::atomic::AtomicU32,
+    pub bytes: *mut u8,
+    pub len: usize,
 }
 
 impl AString {
+    #[inline]
+    pub fn flat(bytes: *mut u8, len: usize) -> Self {
+        Self {
+            kind: StringKind::Flat as u8,
+            _pad: [0; 3],
+            atom: std::sync::atomic::AtomicU32::new(0),
+            bytes,
+            len,
+        }
+    }
+
+    #[inline]
+    pub fn flat_with_atom(bytes: *mut u8, len: usize, atom: crate::intern::Atom) -> Self {
+        Self {
+            kind: StringKind::Flat as u8,
+            _pad: [0; 3],
+            atom: std::sync::atomic::AtomicU32::new(atom.0),
+            bytes,
+            len,
+        }
+    }
+
     /// Is this box a cons (rope) node rather than a flat string?
     #[inline]
     pub fn is_cons(&self) -> bool {
-        (self.bytes as u64) >> 48 == (TAG_STR >> 48)
+        self.kind == StringKind::Cons as u8
     }
 
     /// Is this box a growable flat-buffer builder?
     #[inline]
     pub fn is_builder(&self) -> bool {
-        (self.bytes as u64) >> 48 == (TAG_OBJ >> 48)
+        self.kind == StringKind::Builder as u8
     }
 
     /// The left child `Value` of a cons node.
@@ -183,7 +276,7 @@ impl AString {
     #[inline]
     pub fn len(&self) -> usize {
         if self.is_cons() {
-            unsafe { *((self as *const AString as *const u8).add(16) as *const usize) }
+            unsafe { *((self as *const AString as *const u8).add(24) as *const usize) }
         } else if self.is_builder() {
             self.builder_len()
         } else {
@@ -267,6 +360,7 @@ fn flatten_rope_in_place(box_ptr: *mut AString) {
     // Rewrite the root box to flat.
     unsafe {
         let root = &mut *box_ptr;
+        root.kind = StringKind::Flat as u8;
         root.bytes = buf;
         root.len = total;
     }
@@ -285,7 +379,7 @@ fn builder_start(a: Value, b: Value) -> Value {
     let b_len = b_box.len();
     let total = a_len + b_len;
     let cap = (total + 16).max(BUILDER_MIN_CAP);
-    let buf = unsafe { (*heap).alloc_raw_region(cap, KIND_STRING as u64) };
+    let buf = unsafe { (*heap).alloc_raw_region(cap, KIND_STRING) };
     unsafe {
         std::ptr::copy_nonoverlapping(a_box.contiguous_bytes(), buf, a_len);
         std::ptr::copy_nonoverlapping(b_box.contiguous_bytes(), buf.add(a_len), b_len);
@@ -311,7 +405,7 @@ fn builder_append(a: Value, b: Value) -> Value {
         (a_box.builder_bytes(), cap)
     } else {
         let new_cap = cap.max(new_len).max(BUILDER_MIN_CAP) * 2;
-        let nb = unsafe { (*heap).alloc_raw_region(new_cap, KIND_STRING as u64) };
+        let nb = unsafe { (*heap).alloc_raw_region(new_cap, KIND_STRING) };
         unsafe {
             std::ptr::copy_nonoverlapping(a_box.builder_bytes(), nb, len);
         }
@@ -337,7 +431,7 @@ fn cons_to_builder(a: Value, b: Value) -> Value {
     let b_len = b_box.len();
     let total = a_len + b_len;
     let cap = (total + 16).max(BUILDER_MIN_CAP);
-    let buf = unsafe { (*heap).alloc_raw_region(cap, KIND_STRING as u64) };
+    let buf = unsafe { (*heap).alloc_raw_region(cap, KIND_STRING) };
     let end = fill_string_into(buf, 0, payload_to_usize(a.0));
     debug_assert_eq!(end, a_len);
     unsafe {
@@ -350,9 +444,10 @@ fn cons_to_builder(a: Value, b: Value) -> Value {
 #[inline]
 fn builder_box(buf: *mut u8, used: usize, cap: usize) -> Value {
     let heap = heap::current_heap();
-    let box_ptr = unsafe { (*heap).alloc_raw_region(32, KIND_STRING as u64) };
+    let box_ptr = unsafe { (*heap).alloc_raw_region(32, KIND_STRING) };
     unsafe {
-        (box_ptr as *mut u64).write(TAG_OBJ);
+        *box_ptr = StringKind::Builder as u8;
+        std::ptr::write_bytes(box_ptr.add(1), 0, 7);
         (box_ptr.add(8) as *mut usize).write(used);
         (box_ptr.add(16) as *mut usize).write(buf as usize);
         (box_ptr.add(24) as *mut usize).write(cap);
@@ -411,6 +506,15 @@ enum MiscBox {
     /// `lastIndex`). The `Mutex` matches the Promise/Channel cross-thread
     /// convention.
     Regex(Arc<Mutex<RegexState>>),
+    Proxy(Arc<Mutex<ProxyState>>),
+}
+
+/// A JS Proxy object holding the target and handler values.
+#[derive(Debug)]
+pub struct ProxyState {
+    pub target: Value,
+    pub handler: Value,
+    pub revoked: bool,
 }
 
 /// Per-object regex state: the shared compiled program plus the mutable
@@ -475,6 +579,7 @@ impl ChannelState {
 }
 
 /// NaN-boxed JavaScript value (see module comment for the layout).
+#[repr(transparent)]
 pub struct Value(u64);
 
 /// Backing store for a JS array value. `Ints` is the V8 `PACKED_SMI_ELEMENTS`
@@ -725,6 +830,7 @@ pub struct FunctionData {
     /// snapshots the passed args into the call frame at entry, because the
     /// frame's local slots overwrite the arg region as the body runs.
     pub uses_args: u8,
+    pub is_generator: bool,
     pub cells: Vec<Rc<RefCell<Value>>>,
     /// Class/static property store: `prototype` (the class's prototype
     /// object, read by `new` and `instanceof`), static methods, etc. `None`
@@ -743,59 +849,81 @@ impl Clone for FunctionData {
             ptr: self.ptr,
             params: self.params,
             uses_args: self.uses_args,
+            is_generator: self.is_generator,
             cells: self.cells.clone(),
             props: self.props.clone(),
         }
     }
 }
 
-/// Hidden-class-style shape: maps property names to storage offsets. Shapes are
+/// Hidden-class-style shape: maps property names (Atoms) to storage offsets. Shapes are
 /// immutable; adding a property transitions the object to a fresh `Rc<Shape>`
 /// (name -> len, value appended). Shape `Rc` identity is the monomorphic
 /// inline-cache key: equal shape pointer means the same layout, so a cached
 /// offset is a valid direct index into the object's `values`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Shape {
-    pub(crate) map: hashbrown::HashMap<String, u32>,
+    pub(crate) map: hashbrown::HashMap<crate::intern::Atom, u32>,
+    pub(crate) insertion_order: Vec<crate::intern::Atom>,
+    pub(crate) names: Vec<String>,
 }
 
-/// Thread-local shape transition cache: `(parent_ptr, name, offset) -> shape`.
-/// Bounded (1024 entries) so long-running servers can't grow it without bound.
-/// Guards the O(N) map clone in `ObjectData::set`. Thread-local because shapes
-/// are `Rc` (not `Sync`); each VM thread builds its own hot shapes.
+// Thread-local shape transition cache: `(parent_ptr, atom, offset) -> shape`.
+// Bounded (1024 entries) so long-running servers can't grow it without bound.
+// Guards the O(N) map clone in `ObjectData::set`. Thread-local because shapes
+// are `Rc` (not `Sync`); each VM thread builds its own hot shapes.
 thread_local! {
-    static TRANSITIONS: std::cell::RefCell<hashbrown::HashMap<(u64, String, u32), Rc<Shape>>> = std::cell::RefCell::new(hashbrown::HashMap::new());
+    static TRANSITIONS: std::cell::RefCell<hashbrown::HashMap<(u64, crate::intern::Atom, u32), Rc<Shape>>> = std::cell::RefCell::new(hashbrown::HashMap::new());
 }
-fn shape_transition_lookup(parent: u64, name: &str, offset: u32) -> Option<Rc<Shape>> {
-    TRANSITIONS.try_with(|t| t.borrow().get(&(parent, name.to_string(), offset)).cloned()).ok().flatten()
+fn shape_transition_lookup(parent: u64, atom: crate::intern::Atom, offset: u32) -> Option<Rc<Shape>> {
+    TRANSITIONS.try_with(|t| t.borrow().get(&(parent, atom, offset)).cloned()).ok().flatten()
 }
-fn shape_transition_insert(parent: u64, name: String, offset: u32, shape: Rc<Shape>) {
+fn shape_transition_insert(parent: u64, atom: crate::intern::Atom, offset: u32, shape: Rc<Shape>) {
     let _ = TRANSITIONS.try_with(|t| {
         let mut g = t.borrow_mut();
         if g.len() >= 1024 {
             let drop_keys: Vec<_> = g.keys().take(256).cloned().collect();
             for k in drop_keys { g.remove(&k); }
         }
-        g.insert((parent, name, offset), shape);
+        g.insert((parent, atom, offset), shape);
     });
 }
 
 impl Shape {
     #[inline]
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.names.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    #[inline]
+    pub fn get_atom(&self, atom: crate::intern::Atom) -> Option<u32> {
+        let n = self.insertion_order.len();
+        if n <= 4 {
+            for (idx, &a) in self.insertion_order.iter().enumerate().rev() {
+                if a == atom {
+                    return Some(idx as u32);
+                }
+            }
+            return None;
+        }
+        self.map.get(&atom).copied()
     }
 
     #[inline]
     pub fn get(&self, name: &str) -> Option<u32> {
-        self.map.get(name).copied()
+        self.get_atom(crate::intern::atom_of(name))
     }
 
     /// Property names in deterministic (sorted) order, for GetKeys and
     /// serialization. (Hash maps are unordered; the old object storage sorted
     /// keys for GetKeys and serialization already depended on ordering.)
     pub fn keys_sorted(&self) -> Vec<&String> {
-        let mut keys: Vec<&String> = self.map.keys().collect();
+        let mut keys: Vec<&String> = self.names.iter().collect();
         keys.sort();
         keys
     }
@@ -804,9 +932,7 @@ impl Shape {
     /// insertion order), for JSON.stringify — JSON emits keys in the order
     /// they were added, unlike GetKeys.
     pub fn keys_by_offset(&self) -> Vec<(&String, u32)> {
-        let mut v: Vec<(&String, u32)> = self.map.iter().map(|(k, o)| (k, *o)).collect();
-        v.sort_by_key(|(_, o)| *o);
-        v
+        self.names.iter().enumerate().map(|(idx, s)| (s, idx as u32)).collect()
     }
 }
 
@@ -851,8 +977,8 @@ pub struct ObjectData {
 
 impl ObjectData {
     #[inline]
-    pub fn get(&self, name: &str) -> Option<&Value> {
-        self.shape.get(name).and_then(|o| {
+    pub fn get_atom(&self, atom: crate::intern::Atom) -> Option<&Value> {
+        self.shape.get_atom(atom).and_then(|o| {
             if self.deleted[o as usize] {
                 None
             } else {
@@ -861,11 +987,16 @@ impl ObjectData {
         })
     }
 
+    #[inline]
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.get_atom(crate::intern::atom_of(name))
+    }
+
     /// Delete `name` (JS `delete o.name`): tombstone the slot to undefined and
     /// flag it so iteration skips it. Returns whether the property existed.
     #[inline]
-    pub fn delete(&mut self, name: &str) -> bool {
-        match self.shape.get(name) {
+    pub fn delete_atom(&mut self, atom: crate::intern::Atom) -> bool {
+        match self.shape.get_atom(atom) {
             Some(o) => {
                 let o = o as usize;
                 self.values[o] = Value::undefined();
@@ -876,15 +1007,20 @@ impl ObjectData {
         }
     }
 
+    #[inline]
+    pub fn delete(&mut self, name: &str) -> bool {
+        self.delete_atom(crate::intern::atom_of(name))
+    }
+
     /// Set `name` to `v`, transitioning to a new shape if the property is new.
     /// Returns the offset written (used to populate the inline cache).
     /// Re-setting a deleted property clears its tombstone flag.
     /// New-shape transitions consult a process-wide transition cache
-    /// `(parent_shape_ptr, name) -> shape`, so creating 200k same-shape objects
+    /// `(parent_shape_ptr, atom) -> shape`, so creating 200k same-shape objects
     /// clones the map once, not 200k times.
     #[inline]
-    pub fn set(&mut self, name: &str, v: Value) -> u32 {
-        match self.shape.get(name) {
+    pub fn set_atom(&mut self, atom: crate::intern::Atom, v: Value) -> u32 {
+        match self.shape.get_atom(atom) {
             Some(o) => {
                 let o = o as usize;
                 self.values[o] = v;
@@ -894,13 +1030,21 @@ impl ObjectData {
             None => {
                 let o = self.values.len() as u32;
                 let parent = Rc::as_ptr(&self.shape) as u64;
-                if let Some(cached) = shape_transition_lookup(parent, name, o) {
+                if let Some(cached) = shape_transition_lookup(parent, atom, o) {
                     self.shape = cached;
                 } else {
                     let mut map = self.shape.map.clone();
-                    map.insert(name.to_string(), o);
-                    let fresh = Rc::new(Shape { map });
-                    shape_transition_insert(parent, name.to_string(), o, fresh.clone());
+                    map.insert(atom, o);
+                    let mut insertion_order = self.shape.insertion_order.clone();
+                    insertion_order.push(atom);
+                    let mut names = self.shape.names.clone();
+                    names.push(crate::intern::str_of(atom));
+                    let fresh = Rc::new(Shape {
+                        map,
+                        insertion_order,
+                        names,
+                    });
+                    shape_transition_insert(parent, atom, o, fresh.clone());
                     self.shape = fresh;
                 }
                 self.values.push(v);
@@ -908,6 +1052,11 @@ impl ObjectData {
                 o
             }
         }
+    }
+
+    #[inline]
+    pub fn set(&mut self, name: &str, v: Value) -> u32 {
+        self.set_atom(crate::intern::atom_of(name), v)
     }
 
     #[inline]
@@ -927,8 +1076,8 @@ impl ObjectData {
         self.shape
             .keys_sorted()
             .into_iter()
-            .filter(|k| !self.deleted[self.shape.map[k.as_str()] as usize])
-            .map(|k| (k.as_str(), &self.values[self.shape.map[k.as_str()] as usize]))
+            .filter(|k| !k.starts_with('\0') && !self.deleted[self.shape.get(k.as_str()).unwrap_or(0) as usize])
+            .map(|k| (k.as_str(), &self.values[self.shape.get(k.as_str()).unwrap_or(0) as usize]))
             .collect()
     }
 
@@ -938,7 +1087,7 @@ impl ObjectData {
         self.shape
             .keys_sorted()
             .into_iter()
-            .filter(|k| !self.deleted[self.shape.map[k.as_str()] as usize])
+            .filter(|k| !k.starts_with('\0') && !self.deleted[self.shape.get(k.as_str()).unwrap_or(0) as usize])
             .collect()
     }
 }
@@ -1087,6 +1236,20 @@ pub trait VmHost {
         Value::undefined()
     }
 
+    /// Format a stack trace string from the current call stack.
+    fn format_stack_trace(&self, name: &str, msg: &str) -> String {
+        if msg.is_empty() {
+            format!("{}\n    at <anonymous>", name)
+        } else {
+            format!("{}: {}\n    at <anonymous>", name, msg)
+        }
+    }
+
+    /// Capture stack trace onto `target`, omitting frames up to `constructor_opt`.
+    fn capture_stack_trace(&mut self, target: &Value, constructor_opt: Option<&Value>) {
+        let _ = (target, constructor_opt);
+    }
+
     /// Settle a promise, queuing its continuations as microtasks.
     fn resolve_promise(&mut self, promise: &Value, value: Value) {
         let _ = (promise, value);
@@ -1208,6 +1371,16 @@ pub trait VmHost {
     /// threads (a channel `recv` waiter) — so its event loop keeps pumping
     /// until the settlement lands and wakes it. Default: no-op.
     fn park_cross_waiter(&mut self, _p: &Value) {}
+
+    /// Resume generator with next value or throw.
+    fn generator_step(&mut self, _gen_id: u64, _val: Value, _is_throw: bool) -> Value {
+        Value::undefined()
+    }
+
+    /// Return generator early.
+    fn generator_return(&mut self, _gen_id: u64, _val: Value) -> Value {
+        Value::undefined()
+    }
 }
 
 pub type NativeFn = Arc<dyn Fn(&[Value], &mut dyn VmHost) -> Value + Send + Sync>;
@@ -1254,12 +1427,10 @@ impl Value {
     }
     #[inline(always)]
     pub fn number(n: f64) -> Value {
-        let bits = n.to_bits();
-        if bits & TAG_MASK == TAG_INT {
-            // A negative NaN would collide with the tag space.
+        if n.is_nan() {
             Value(CANON_NAN)
         } else {
-            Value(bits)
+            Value(n.to_bits())
         }
     }
     #[inline(always)]
@@ -1282,7 +1453,15 @@ impl Value {
     }
     #[inline]
     pub fn symbol(id: u64) -> Value {
-        Value(TAG_SMALL | S_SYMBOL | ((id & PAYLOAD_MASK) << 4))
+        Value(TAG_SMALL | S_SYMBOL | ((id & 0x0000_0FFF_FFFF_FFFF) << 4))
+    }
+    #[inline]
+    pub fn proxy(target: Value, handler: Value) -> Value {
+        Value::misc(MiscBox::Proxy(Arc::new(Mutex::new(ProxyState {
+            target,
+            handler,
+            revoked: false,
+        }))))
     }
     /// Allocate a string from the active value heap: bytes and the `AString`
     /// box both live in the arena, so the string has no per-object allocation
@@ -1292,7 +1471,7 @@ impl Value {
         let heap = heap::current_heap();
         let bytes = unsafe { (*heap).alloc_bytes(s.as_bytes()) };
         let len = s.len();
-        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_STRING, AString { bytes, len }) };
+        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_STRING, AString::flat(bytes, len)) };
         Value(TAG_STR | usize_to_payload(box_ptr as usize))
     }
 
@@ -1305,7 +1484,7 @@ impl Value {
         unsafe {
             *bytes = b;
         }
-        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_STRING, AString { bytes, len: 1 }) };
+        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_STRING, AString::flat(bytes, 1)) };
         Value(TAG_STR | usize_to_payload(box_ptr as usize))
     }
 
@@ -1317,7 +1496,7 @@ impl Value {
         let heap = heap::current_heap();
         let bytes = unsafe { (*heap).alloc_bytes(s.as_bytes()) };
         let len = s.len();
-        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_STRING, AString { bytes, len }) };
+        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_STRING, AString::flat(bytes, len)) };
         Value(TAG_STR | usize_to_payload(box_ptr as usize))
     }
 
@@ -1332,7 +1511,7 @@ impl Value {
             std::ptr::copy_nonoverlapping(a.as_ptr(), bytes, a.len());
             std::ptr::copy_nonoverlapping(b.as_ptr(), bytes.add(a.len()), b.len());
         }
-        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_STRING, AString { bytes, len: total }) };
+        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_STRING, AString::flat(bytes, total)) };
         Value(TAG_STR | usize_to_payload(box_ptr as usize))
     }
 
@@ -1345,13 +1524,15 @@ impl Value {
     pub fn rope(a: Value, b: Value) -> Value {
         debug_assert!(a.is_string() && b.is_string(), "rope operands must be strings");
         let heap = heap::current_heap();
-        let box_ptr = unsafe { (*heap).alloc_raw_region(32, KIND_STRING as u64) as *mut AString };
+        let box_ptr = unsafe { (*heap).alloc_raw_region(32, KIND_STRING) as *mut AString };
         unsafe {
+            (*box_ptr).kind = StringKind::Cons as u8;
+            std::ptr::write_bytes((box_ptr as *mut u8).add(1), 0, 7);
             (*box_ptr).bytes = a.0 as *mut u8;
             (*box_ptr).len = b.0 as usize;
             // O(1) total: both children report their length from a field
             // (flat) or the cache (cons) — never a tree walk.
-            ((box_ptr as *mut u8).add(16) as *mut usize).write(a.str_len() + b.str_len());
+            ((box_ptr as *mut u8).add(24) as *mut usize).write(a.str_len() + b.str_len());
         }
         Value(TAG_STR | usize_to_payload(box_ptr as usize))
     }
@@ -1420,14 +1601,28 @@ impl Value {
     ) -> Value {
         let mut shape_map =
             hashbrown::HashMap::with_capacity_and_hasher(entries.len(), Default::default());
+        let mut insertion_order = Vec::with_capacity(entries.len());
+        let mut names = Vec::with_capacity(entries.len());
         let mut values = Vec::with_capacity(entries.len());
         for (k, v) in entries {
-            shape_map.insert(k, values.len() as u32);
-            values.push(v);
+            let atom = crate::intern::atom_of(&k);
+            if let Some(&prev_idx) = shape_map.get(&atom) {
+                values[prev_idx as usize] = v;
+            } else {
+                let off = values.len() as u32;
+                shape_map.insert(atom, off);
+                insertion_order.push(atom);
+                names.push(k);
+                values.push(v);
+            }
         }
         let n = values.len();
         let od = ObjectData {
-            shape: Rc::new(Shape { map: shape_map }),
+            shape: Rc::new(Shape {
+                map: shape_map,
+                insertion_order,
+                names,
+            }),
             values,
             deleted: vec![false; n],
             proto,
@@ -1454,6 +1649,8 @@ impl Value {
         let od = ObjectData {
             shape: Rc::new(Shape {
                 map: hashbrown::HashMap::new(),
+                insertion_order: Vec::new(),
+                names: Vec::new(),
             }),
             values: Vec::new(),
             deleted: Vec::new(),
@@ -1596,7 +1793,9 @@ impl Value {
         if t != other.0 & TAG_MASK {
             return false;
         }
-        if t == TAG_MISC {
+        if t == TAG_SMALL {
+            (self.0 & 0xF) == (other.0 & 0xF)
+        } else if t == TAG_MISC {
             match (self.as_misc(), other.as_misc()) {
                 (Some(a), Some(b)) => std::mem::discriminant(a) == std::mem::discriminant(b),
                 _ => false,
@@ -1749,6 +1948,14 @@ impl Value {
     pub fn is_regex(&self) -> bool {
         matches!(self.as_misc(), Some(MiscBox::Regex(_)))
     }
+    #[inline(always)]
+    pub fn is_symbol(&self) -> bool {
+        self.0 & TAG_MASK == TAG_SMALL && self.0 & 0xF == S_SYMBOL
+    }
+    #[inline(always)]
+    pub fn is_proxy(&self) -> bool {
+        matches!(self.as_misc(), Some(MiscBox::Proxy(_)))
+    }
 
     // ---- accessors ---------------------------------------------------------
 
@@ -1807,6 +2014,24 @@ impl Value {
             let b = unsafe { &*ptr };
             let bytes = unsafe { std::slice::from_raw_parts(b.contiguous_bytes(), b.len()) };
             Some(unsafe { std::str::from_utf8_unchecked(bytes) })
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_atom(&self) -> Option<crate::intern::Atom> {
+        if self.0 & TAG_MASK == TAG_STR {
+            let ptr = heap_ptr::<AString>(self.0);
+            let b = unsafe { &*ptr };
+            let cur = b.atom.load(std::sync::atomic::Ordering::Relaxed);
+            if cur != 0 {
+                return Some(crate::intern::Atom(cur));
+            }
+            let s = self.as_str()?;
+            let a = crate::intern::atom_of(s);
+            b.atom.store(a.0, std::sync::atomic::Ordering::Relaxed);
+            Some(a)
         } else {
             None
         }
@@ -1915,6 +2140,13 @@ impl Value {
             _ => None,
         }
     }
+    #[inline(always)]
+    pub fn as_proxy(&self) -> Option<&Arc<Mutex<ProxyState>>> {
+        match self.as_misc() {
+            Some(MiscBox::Proxy(p)) => Some(p),
+            _ => None,
+        }
+    }
 
     // ---- semantics ---------------------------------------------------------
 
@@ -1922,10 +2154,7 @@ impl Value {
     pub fn is_truthy(&self) -> bool {
         let tag = self.0 & TAG_MASK;
         if tag == TAG_SMALL {
-            match self.0 & 0xF {
-                S_UNDEF | S_NULL | S_FALSE => false,
-                _ => true,
-            }
+            !matches!(self.0 & 0xF, S_UNDEF | S_NULL | S_FALSE)
         } else if tag == TAG_INT {
             self.as_int().map(|i| i != 0).unwrap_or(true)
         } else if !self.is_tagged() {
@@ -1952,6 +2181,9 @@ impl Value {
             "string"
         } else if self.0 & TAG_MASK == TAG_SMALL && self.0 & 0xF == S_SYMBOL {
             "symbol"
+        } else if let Some(p) = self.as_proxy() {
+            let guard = p.lock().unwrap_or_else(|g| g.into_inner());
+            guard.target.type_name()
         } else if self.is_array() || self.is_object() || self.is_promise() || self.is_regex() {
             "object"
         } else if self.is_function() || self.is_native() {
@@ -2326,6 +2558,12 @@ fn abstract_eq(a: &Value, b: &Value) -> bool {
     if let (Some(x), Some(y)) = (a_num, b_num) {
         return x == y;
     }
+    if a.is_symbol() || b.is_symbol() {
+        if let (Some(x), Some(y)) = (a.as_symbol(), b.as_symbol()) {
+            return x == y;
+        }
+        return false;
+    }
     if a.is_undefined() && b.is_undefined() {
         return true;
     }
@@ -2483,6 +2721,11 @@ pub fn object_js_string(v: &Value) -> Option<String> {
 pub const DATE_CONTAINER: u8 = 4;
 /// Reserved own-property key holding a Date's epoch milliseconds.
 pub const DATE_MS_KEY: &str = "\u{0}time";
+
+/// Generator-instance container tag (5).
+pub const GENERATOR_CONTAINER: u8 = 5;
+/// Reserved own-property key holding a Generator's execution state id.
+pub const GENERATOR_ID_KEY: &str = "\u{0}gen_id";
 
 /// The epoch-milliseconds stored in a Date instance, if `v` is one.
 /// `Some(NaN)` means an Invalid Date; plain objects/arrays return `None`.
@@ -3014,7 +3257,7 @@ pub fn js_number_to_string(n: f64) -> String {
         return "0".to_string();
     }
     let a = n.abs();
-    if a >= 1e21 || a < 1e-6 {
+    if !(1e-6..1e21).contains(&a) {
         // Rust's {:e} gives the same shortest mantissa as V8; only the
         // exponent notation differs ("1e21" vs "1e+21", "1.5e-7" vs "1.5e-7").
         let s = format!("{:e}", n);
@@ -3129,8 +3372,11 @@ impl fmt::Display for Value {
             write!(f, "[function p{} @{}]", fd.program, fd.ptr)
         } else if self.is_native() {
             write!(f, "[native function]")
-        } else if self.0 & TAG_MASK == TAG_SMALL && self.0 & 0xF == S_SYMBOL {
-            write!(f, "Symbol({})", self.0 >> 4)
+        } else if let Some(id) = self.as_symbol() {
+            match symbol_description(id) {
+                Some(desc) => write!(f, "Symbol({})", desc),
+                None => write!(f, "Symbol()"),
+            }
         } else if let Some(p) = self.as_pointer() {
             write!(f, "Pointer({:p})", p)
         } else if let Some((ptr, len)) = self.as_buffer() {
@@ -3313,7 +3559,7 @@ fn promote_string_payload(heap: &mut ArenaHeap, copy: *mut AString, stack: &mut 
     } else if unsafe { (*copy).is_builder() } {
         let len = unsafe { (*copy).builder_len() };
         let old_bytes = unsafe { (*copy).builder_bytes() };
-        let new_bytes = heap.promote_bytes(old_bytes, len);
+        let new_bytes = unsafe { heap.promote_bytes(old_bytes, len) };
         unsafe { (*copy).set_builder_bytes(new_bytes); }
     } else {
         let len = unsafe { (*copy).len };
@@ -3330,21 +3576,21 @@ pub fn walk_cell(
     heap: &mut ArenaHeap,
     map: &mut PromoteMap,
     visited: &mut HashSet<usize>,
-    mut mark: Option<&mut MarkState>,
+    mark: Option<&mut MarkState>,
     cell: &Rc<RefCell<Value>>,
 ) {
     let addr = Rc::as_ptr(cell) as usize;
     if visited.insert(addr) {
-        walk_value(heap, map, visited, mark.as_deref_mut(), &mut cell.borrow_mut());
+        walk_value(heap, map, visited, mark, &mut cell.borrow_mut());
     }
 }
 
-/// Walk one reachable value: young boxes are copied into the old generation
-/// (fixing up their interiors recursively); old boxes are never traced here —
-/// young values written into them are handled by the VM's dirty-box scan —
-/// but when `mark` is active they are recorded for the incremental mark's
-/// budgeted worklist trace. Rc-backed structures (cells, functions, promises,
-/// channels) are traversed with a `visited` set so cycles terminate.
+// Walk one reachable value: young boxes are copied into the old generation
+// (fixing up their interiors recursively); old boxes are never traced here —
+// young values written into them are handled by the VM's dirty-box scan —
+// but when `mark` is active they are recorded for the incremental mark's
+// budgeted worklist trace. Rc-backed structures (cells, functions, promises,
+// channels) are traversed with a `visited` set so cycles terminate.
 
 /// A Map/Set entry key: wraps a [`Value`] with SameValueZero equality and
 /// content hashing, so the engine's `HashMap` can host JS keys — `1` and
@@ -3631,10 +3877,8 @@ impl ContainerData {
     /// Amortized O(1) per delete.
     fn compact_order(&mut self) {
         let mut order = Vec::with_capacity(self.used);
-        for slot in self.order.iter() {
-            if let Some(k) = slot {
-                order.push(Some(k.clone()));
-            }
+        for k in self.order.iter().flatten() {
+            order.push(Some(k.clone()));
         }
         self.order = order;
     }
@@ -3675,11 +3919,10 @@ pub fn walk_container_entries(
             // and numeric keys hash by content/value, so their stored hashes
             // survive a remap untouched.
             match slot.key.bits() & TAG_MASK {
-                TAG_OBJ | TAG_ARR | TAG_FN | TAG_CELL | TAG_MISC => {
-                    if (slot.key.hash_key() | 2) != slot.hash {
+                TAG_OBJ | TAG_ARR | TAG_FN | TAG_CELL | TAG_MISC
+                    if (slot.key.hash_key() | 2) != slot.hash => {
                         stale = true;
                     }
-                }
                 _ => {}
             }
         }
@@ -3720,7 +3963,7 @@ pub fn walk_container_entries(
     // The sweep keeps exactly what the mark set records: a live container's
     // slot region must be in it, or the non-moving sweep frees it from under
     // the container.
-    if let Some(m) = mark.as_deref_mut() {
+    if let Some(m) = mark {
         m.set.insert(cd.slots as usize);
     }
 }
@@ -3902,7 +4145,7 @@ pub fn walk_value(
                     let mut ps = p.lock().unwrap_or_else(|g| g.into_inner());
                     match &mut ps.status {
                         PromiseStatus::Fulfilled(val) | PromiseStatus::Rejected(val) => {
-                            walk_value(heap, map, visited, mark.as_deref_mut(), val)
+                            walk_value(heap, map, visited, mark, val)
                         }
                         PromiseStatus::Pending => {}
                     }
@@ -3962,5 +4205,5 @@ pub fn sweep_young(heap: &mut ArenaHeap, map: &PromoteMap) {
 /// boxes are never moved. The caller must hold no outstanding `RefCell`
 /// borrows into the old generation (the VM is quiescent at unit boundaries).
 pub fn sweep_old_mark_sweep(heap: &mut ArenaHeap, live: &HashSet<usize>) {
-    heap.sweep_old(live, |addr, kind| drop_box_contents(addr, kind));
+    heap.sweep_old(live, drop_box_contents);
 }

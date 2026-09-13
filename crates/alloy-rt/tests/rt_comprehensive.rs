@@ -4,8 +4,8 @@ use alloy_rt::python_bridge::PythonBridge;
 use std::time::Duration;
 
 #[test] fn server_config_default() { let c=ServerConfig::default(); assert_eq!(c.read_timeout, Duration::from_secs(10)); assert!(c.keep_alive); }
-#[test] fn server_new() { let s=HttpServer::new("127.0.0.1:0"); assert!(true); }
-#[test] fn server_with_config() { let s=HttpServer::new("127.0.0.1:0").with_config(ServerConfig{ read_timeout: Duration::from_secs(2), ..Default::default()}); assert!(true); }
+#[test] fn server_new() { let s=HttpServer::new("127.0.0.1:0"); let _ = s; }
+#[test] fn server_with_config() { let s=HttpServer::new("127.0.0.1:0").with_config(ServerConfig{ read_timeout: Duration::from_secs(2), ..Default::default()}); let _ = s; }
 #[test] fn message_bus_bound() { let b=MessageBus::with_bound(16); assert_eq!(b.bound(),16); }
 #[test] fn message_bus_send_recv() { let mut b=MessageBus::new(); let rx=b.create_channel("a"); assert_eq!(b.channel_count(),1); assert!(b.try_send("a", b"hi".to_vec())); }
 #[test] fn message_bus_missing() { let b=MessageBus::new(); assert!(!b.try_send("missing", vec![])); }

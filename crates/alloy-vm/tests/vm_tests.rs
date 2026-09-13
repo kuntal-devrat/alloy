@@ -8,6 +8,9 @@ fn run(src: &str) -> Vec<String> {
     let program = Compiler::compile_source(src).expect("compile failed");
     let (mut vm, out) = Vm::with_output(program);
     vm.run();
+    if let Some(err) = vm.take_error() {
+        eprintln!("VM ERROR: {:?}", err);
+    }
     let lines = out.lock().unwrap().clone();
     lines
 }
@@ -2833,4 +2836,332 @@ fn cannot_shadow_web_builtins() {
         compile_err("function fetchSync() {}"),
         CompileError::CannotShadowBuiltin(_)
     ));
+}
+
+#[test]
+fn regex_catastrophic_backtracking_throws() {
+    let out = run_lines(
+        "try {\n\
+            const re = /(a+)+b/;\n\
+            re.test('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');\n\
+            print('no throw');\n\
+        } catch (e) {\n\
+            print('caught: ' + (e.message || e));\n\
+        }",
+    );
+    assert!(out.starts_with("caught: SyntaxError: Invalid regular expression: regular expression too complex"));
+}
+
+#[test]
+fn generator_basic_and_stepping() {
+    let src = r#"
+        function* gen() {
+            yield 10;
+            yield 20;
+            return 30;
+        }
+        let g = gen();
+        let r1 = g.next();
+        let r2 = g.next();
+        let r3 = g.next();
+        let r4 = g.next();
+        print(r1.value, r1.done);
+        print(r2.value, r2.done);
+        print(r3.value, r3.done);
+        print(r4.value, r4.done);
+    "#;
+    assert_eq!(
+        run_lines(src),
+        "10 false\n20 false\n30 true\nundefined true"
+    );
+}
+
+#[test]
+fn generator_next_with_arguments() {
+    let src = r#"
+        function* gen() {
+            let a = yield 1;
+            let b = yield (a + 10);
+            return b * 2;
+        }
+        let g = gen();
+        let r1 = g.next();
+        let r2 = g.next(5);
+        let r3 = g.next(7);
+        print(r1.value, r2.value, r3.value);
+    "#;
+    assert_eq!(run_lines(src), "1 15 14");
+}
+
+#[test]
+fn generator_for_of_and_spread() {
+    let src = r#"
+        function* nums() {
+            yield 1;
+            yield 2;
+            yield 3;
+        }
+        let sum = 0;
+        for (let x of nums()) {
+            sum += x;
+        }
+        let arr = [...nums()];
+        print(sum, arr.join(","));
+    "#;
+    assert_eq!(run_lines(src), "6 1,2,3");
+}
+
+#[test]
+fn generator_yield_star() {
+    let src = r#"
+        function* inner() {
+            yield 2;
+            yield 3;
+        }
+        function* outer() {
+            yield 1;
+            yield* inner();
+            yield* [4, 5];
+            yield 6;
+        }
+        let res = [...outer()];
+        print(res.join(","));
+    "#;
+    assert_eq!(run_lines(src), "1,2,3,4,5,6");
+}
+
+#[test]
+fn generator_methods_in_object_and_class() {
+    let src = r#"
+        let obj = {
+            *items() {
+                yield "a";
+                yield "b";
+            }
+        };
+        class C {
+            *gen() {
+                yield 100;
+                yield 200;
+            }
+        }
+        let c = new C();
+        print([...obj.items()].join("-"));
+        print([...c.gen()].join("-"));
+    "#;
+    assert_eq!(run_lines(src), "a-b\n100-200");
+}
+
+#[test]
+fn class_public_and_static_fields() {
+    let src = r#"
+        class Point {
+            x = 10;
+            y = 20;
+            static origin = "0,0";
+            constructor(z) {
+                this.z = z;
+            }
+        }
+        let p = new Point(30);
+        print(p.x, p.y, p.z, Point.origin);
+    "#;
+    assert_eq!(run_lines(src), "10 20 30 0,0");
+}
+
+#[test]
+fn class_private_fields_and_methods() {
+    let src = r#"
+        class Counter {
+            #count = 5;
+            #secret() {
+                return 42;
+            }
+            inc() {
+                this.#count += 1;
+            }
+            getVal() {
+                return this.#count + this.#secret();
+            }
+            testInvalid(other) {
+                return other.#count;
+            }
+        }
+        let c = new Counter();
+        c.inc();
+        print(c.getVal());
+        try {
+            c.testInvalid({});
+            print("no throw");
+        } catch (e) {
+            print("caught: " + (e.message || e));
+        }
+    "#;
+    assert_eq!(
+        run_lines(src),
+        "48\ncaught: TypeError: Cannot read private member #count from an object whose class did not declare it"
+    );
+}
+
+#[test]
+fn class_and_object_getters_setters() {
+    let src = r#"
+        class Box {
+            _w = 5;
+            get width() { return this._w; }
+            set width(v) { this._w = v * 2; }
+        }
+        let b = new Box();
+        print(b.width);
+        b.width = 10;
+        print(b.width);
+
+        let obj = {
+            _x: 100,
+            get x() { return this._x; },
+            set x(val) { this._x = val + 1; }
+        };
+        print(obj.x);
+        obj.x = 200;
+        print(obj.x);
+    "#;
+    assert_eq!(run_lines(src), "5\n20\n100\n201");
+}
+
+#[test]
+fn array_and_string_at() {
+    let src = r#"
+        let a = [10, 20, 30, 40];
+        print(a.at(0), a.at(-1), a.at(-2), a.at(10));
+        let s = "alloy";
+        print(s.at(0), s.at(-1), s.at(-2), s.at(10));
+    "#;
+    assert_eq!(run_lines(src), "10 40 30 undefined\na y o undefined");
+}
+
+#[test]
+fn proxy_and_reflect_traps() {
+    let src = r#"
+        let target = { a: 1, b: 2 };
+        let proxy = new Proxy(target, {
+            get(t, prop) {
+                return t[prop] * 10;
+            },
+            set(t, prop, val) {
+                t[prop] = val + 5;
+                return true;
+            }
+        });
+        print(proxy.a, proxy.b);
+        proxy.a = 3;
+        print(proxy.a, target.a);
+
+        let rev = Proxy.revocable({ x: 99 }, {});
+        print(rev.proxy.x);
+        rev.revoke();
+        try {
+            let _ = rev.proxy.x;
+            print("no throw");
+        } catch (e) {
+            print("revoked caught");
+        }
+    "#;
+    assert_eq!(run_lines(src), "10 20\n80 8\n99\nrevoked caught");
+}
+
+#[test]
+fn symbol_iterator_protocol() {
+    let src = r#"
+        let arr = [100, 200];
+        let it = arr[Symbol.iterator]();
+        let s1 = it.next();
+        let s2 = it.next();
+        let s3 = it.next();
+        print(s1.value, s1.done);
+        print(s2.value, s2.done);
+        print(s3.value, s3.done);
+
+        let sit = "hi"[Symbol.iterator]();
+        print(sit.next().value, sit.next().value, sit.next().done);
+    "#;
+    assert_eq!(run_lines(src), "100 false\n200 false\nundefined true\nh i true");
+}
+
+#[test]
+fn object_has_own_and_from_entries() {
+    let src = r#"
+        let obj = { a: 1 };
+        print(Object.hasOwn(obj, "a"), Object.hasOwn(obj, "toString"));
+        let entries = [["x", 10], ["y", 20]];
+        let fromObj = Object.fromEntries(entries);
+        print(fromObj.x, fromObj.y);
+    "#;
+    assert_eq!(run_lines(src), "true false\n10 20");
+}
+
+#[test]
+fn structured_clone_test() {
+    let src = r#"
+        let orig = { num: 42, arr: [1, { k: "v" }] };
+        let copy = structuredClone(orig);
+        copy.arr[1].k = "changed";
+        print(orig.arr[1].k, copy.arr[1].k);
+    "#;
+    assert_eq!(run_lines(src), "v changed");
+}
+
+#[test]
+fn error_stack_trace_formatting() {
+    let src = r#"
+        function baz() {
+            let err = new Error("something went wrong");
+            print(err.name);
+            print(err.message);
+            print(typeof err.stack);
+            print(err.stack.includes("Error: something went wrong"));
+            print(err.stack.includes("at baz"));
+        }
+        function bar() { baz(); }
+        function foo() { bar(); }
+        foo();
+    "#;
+    assert_eq!(run_lines(src), "Error\nsomething went wrong\nstring\ntrue\ntrue");
+}
+
+#[test]
+fn error_capture_stack_trace() {
+    let src = r#"
+        function MyError(msg) {
+            this.name = "MyError";
+            this.message = msg;
+            Error.captureStackTrace(this, MyError);
+        }
+        function testHelper() {
+            let e = new MyError("custom fail");
+            print(e.stack.includes("MyError: custom fail"));
+            print(!e.stack.includes("at MyError"));
+            print(e.stack.includes("at testHelper"));
+        }
+        testHelper();
+    "#;
+    assert_eq!(run_lines(src), "true\ntrue\ntrue");
+}
+
+#[test]
+fn bytecode_line_table_lookup() {
+    let mut prog = alloy_vm::bytecode::Program::new();
+    prog.source_file = Some("test.ajs".to_string());
+    prog.line_table.push((0, 1, 1));
+    prog.line_table.push((10, 2, 5));
+    prog.line_table.push((25, 5, 12));
+    prog.line_table.push((50, 10, 1));
+
+    assert_eq!(prog.get_location(0), Some((1, 1)));
+    assert_eq!(prog.get_location(5), Some((1, 1)));
+    assert_eq!(prog.get_location(10), Some((2, 5)));
+    assert_eq!(prog.get_location(20), Some((2, 5)));
+    assert_eq!(prog.get_location(25), Some((5, 12)));
+    assert_eq!(prog.get_location(49), Some((5, 12)));
+    assert_eq!(prog.get_location(50), Some((10, 1)));
+    assert_eq!(prog.get_location(100), Some((10, 1)));
 }

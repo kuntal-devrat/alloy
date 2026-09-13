@@ -151,22 +151,8 @@ impl HttpServer {
             tokio::spawn(async move {
                 let mut buf = Vec::with_capacity(8192);
                 let mut tmp = vec![0u8; 8192];
-                loop {
-                    // read with timeout
-                    let read_fut = stream.read(&mut tmp);
-                    let n = match timeout(cfg.read_timeout, read_fut).await {
-                        Ok(Ok(0)) => break, // closed
-                        Ok(Ok(n)) => n,
-                        Ok(Err(_)) => break,
-                        Err(_) => break, // timeout
-                    };
-                    buf.extend_from_slice(&tmp[..n]);
-                    if buf.len() > cfg.max_header_bytes + cfg.max_body_bytes {
-                        let resp = build_response(413, "Payload Too Large", &[], b"Payload Too Large");
-                        let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
-                        break;
-                    }
-                    // Try parse one request (support pipelining: loop)
+                'conn: loop {
+                    // Try parse requests (supports pipelining: processes all complete requests in buffer)
                     let mut consumed = 0usize;
                     let mut parsed_any = false;
                     while let Some((req, needed)) = parse_request(&buf[consumed..]) {
@@ -183,10 +169,10 @@ impl HttpServer {
                         // Ensure response is framed; if handler returned only body, frame it
                         let framed = if response.starts_with(b"HTTP/") { response } else { build_response(200, "OK", &[("Content-Type","text/plain")], &response) };
                         if timeout(cfg.write_timeout, stream.write_all(&framed)).await.is_err() {
-                            break;
+                            break 'conn;
                         }
                         if timeout(cfg.write_timeout, stream.flush()).await.is_err() {
-                            break;
+                            break 'conn;
                         }
                         consumed += needed;
                         if !cfg.keep_alive {
@@ -194,50 +180,42 @@ impl HttpServer {
                             return;
                         }
                     }
-                    if parsed_any {
-                        // remove consumed bytes
+
+                    if consumed > 0 {
                         buf.drain(..consumed);
-                        // if keep-alive, continue reading next request; else break
-                        // idle timeout for keep-alive
-                        if buf.is_empty() && cfg.keep_alive {
-                            // wait briefly for next request
-                            match timeout(cfg.keep_alive_timeout, stream.read(&mut tmp)).await {
-                                Ok(Ok(0)) => break,
-                                Ok(Ok(m)) => { buf.extend_from_slice(&tmp[..m]); continue; }
-                                Ok(Err(_)) => break,
-                                Err(_) => break, // keep-alive timeout -> close
-                            }
-                        }
+                    }
+
+                    if parsed_any && !cfg.keep_alive {
+                        break 'conn;
+                    }
+
+                    // Check size limits on unparsed data
+                    if buf.len() > cfg.max_header_bytes + cfg.max_body_bytes {
+                        let resp = build_response(413, "Payload Too Large", &[], b"Payload Too Large");
+                        let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
+                        break 'conn;
+                    }
+                    if buf.len() > cfg.max_header_bytes && !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let resp = build_response(431, "Request Header Fields Too Large", &[], b"Header Too Large");
+                        let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
+                        break 'conn;
+                    }
+
+                    // If we already parsed at least one request and the buffer is empty, wait with keep_alive_timeout
+                    let wait_timeout = if parsed_any && buf.is_empty() {
+                        cfg.keep_alive_timeout
                     } else {
-                        // incomplete request: continue reading unless header too large
-                        if buf.len() > cfg.max_header_bytes && !buf.windows(4).any(|w| w==b"\r\n\r\n") {
-                            let resp = build_response(431, "Request Header Fields Too Large", &[], b"Header Too Large");
-                            let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
-                            break;
-                        }
-                        // need more data, loop to read again (with outer read we already did one; continue)
-                        // For now, if not parsed and buf has no complete header, just continue outer loop which will read again.
-                        // To avoid tight loop, we already read one chunk; if still incomplete, next iteration will read more.
-                        // So break inner parse and let outer read more if not enough.
-                        if buf.windows(4).any(|w| w==b"\r\n\r\n") {
-                            // has header but body incomplete — need more reads; continue outer
-                        }
-                    }
-                    // If we consumed everything and keep-alive, outer loop will read next request.
-                    // If keep-alive disabled, close.
-                    if !cfg.keep_alive && parsed_any {
-                        break;
-                    }
-                    // prevent tight loop when no progress and no data: wait for more
-                    if !parsed_any && buf.len() < cfg.max_header_bytes {
-                        // need more data, continue to next read iteration (we already have buf)
-                        // timeout will handle stall
-                    }
-                    // For non-keep-alive after one response, close
-                    if parsed_any && !cfg.keep_alive { break; }
-                    // If we reach here with parsed response sent and keep-alive on, loop will handle next recv via top of loop
-                    // To avoid double-read, we already did extra read for keep-alive idle; if not idle, loop continues to outer read
-                    break; // outer will re-enter read; for simplicity handle one batch per accept iteration
+                        cfg.read_timeout
+                    };
+
+                    let read_fut = stream.read(&mut tmp);
+                    let n = match timeout(wait_timeout, read_fut).await {
+                        Ok(Ok(0)) => break 'conn, // EOF
+                        Ok(Ok(n)) => n,
+                        Ok(Err(_)) => break 'conn, // error
+                        Err(_) => break 'conn,     // timeout
+                    };
+                    buf.extend_from_slice(&tmp[..n]);
                 }
             });
         }

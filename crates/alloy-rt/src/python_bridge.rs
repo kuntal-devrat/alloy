@@ -37,27 +37,51 @@ impl PythonBridge {
         }
         let mut cmd = Command::new(&self.python_path);
         cmd.args(args);
-        // Use timeout via wait_timeout crate logic manually: spawn + timed wait
-        let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
-        let start = std::time::Instant::now();
-        loop {
-            match child.try_wait()? {
-                Some(status) => {
-                    let out = child.wait_with_output()?;
-                    if !status.success() {
-                        let err = String::from_utf8_lossy(&out.stderr);
-                        return Err(format!("python failed ({}): {}", status, err.trim()).into());
-                    }
-                    return Ok(String::from_utf8_lossy(&out.stdout).to_string());
+        let child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        let pid = child.id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let res = child.wait_with_output();
+            let _ = tx.send(res);
+        });
+
+        match rx.recv_timeout(self.timeout) {
+            Ok(res) => {
+                let _ = handle.join();
+                let out = res?;
+                if !out.status.success() {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    return Err(format!("python failed ({}): {}", out.status, err.trim()).into());
                 }
-                None => {
-                    if start.elapsed() > self.timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(format!("python call timed out after {:?}", self.timeout).into());
+                Ok(String::from_utf8_lossy(&out.stdout).to_string())
+            }
+            Err(_) => {
+                #[cfg(windows)]
+                {
+                    use windows_sys::Win32::Foundation::CloseHandle;
+                    use windows_sys::Win32::System::Threading::{
+                        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+                    };
+                    unsafe {
+                        let proc_handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                        if !proc_handle.is_null() {
+                            TerminateProcess(proc_handle, 1);
+                            CloseHandle(proc_handle);
+                        }
                     }
-                    std::thread::sleep(Duration::from_millis(10));
                 }
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+                let _ = handle.join();
+                Err(format!("python call timed out after {:?}", self.timeout).into())
             }
         }
     }

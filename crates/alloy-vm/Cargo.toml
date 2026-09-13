@@ -2,10 +2,29 @@
 name = "alloy-vm"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Register-based bytecode compiler, inline caches, Cranelift JIT engine, and execution virtual machine for the Alloy runtime."
+
+[lints]
+workspace = true
 
 [dependencies]
-alloy-core = { path = "../alloy-core" }
+alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.1.0" }
 hashbrown.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+cranelift-codegen = "0.136.0-rc.1"
+cranelift-frontend = "0.136.0-rc.1"
+cranelift-jit = "0.136.0-rc.1"
+cranelift-module = "0.136.0-rc.1"
+cranelift-native = "0.136.0-rc.1"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

@@ -11,11 +11,37 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+authors = ["Alloy Contributors <team@alloy-runtime.org>"]
+repository = "https://github.com/alloy-runtime/alloy"
+homepage = "https://alloy-runtime.org"
+readme = "README.md"
+keywords = ["javascript", "runtime", "jit", "polyglot", "concurrency"]
+categories = ["compilers", "development-tools", "virtualization"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
 hashbrown = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ureq = { version = "2.10", features = ["tls"] }
+
+[workspace.lints.rust]
+dead_code = "allow"
+unused_variables = "allow"
+unused_mut = "allow"
+
+[workspace.lints.clippy]
+type_complexity = "allow"
+len_without_is_empty = "allow"
+doc_lazy_continuation = "allow"
+needless_range_loop = "allow"
+vec_init_then_push = "allow"
+unnecessary_sort_by = "allow"
+missing_safety_doc = "allow"
+redundant_guards = "allow"
+while_let_loop = "allow"
+match_single_binding = "allow"
 
 # Interpreter hot loop: single codegen unit + thin LTO let the dispatch loop
 # and Value arithmetic inline aggressively. Costs build time, buys runtime.

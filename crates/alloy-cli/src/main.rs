@@ -1,4 +1,3 @@
-use alloy_core::arena::Arena;
 use alloy_vm::bytecode::Program;
 
 use alloy_vm::compiler::Compiler;
@@ -7,12 +6,19 @@ use std::env;
 use std::fs;
 use std::time::Instant;
 
+mod pkg;
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
         eprintln!("alloy runtime v0.1.0");
         eprintln!("Usage: alloy <script.ajs|script.js|script.ax>");
+        eprintln!("       alloy init [dir]");
+        eprintln!("       alloy add <pkg>");
+        eprintln!("       alloy install");
+        eprintln!("       alloy test [filter]");
+        eprintln!("       alloy lsp");
         eprintln!("       alloy --bench <script.ajs>");
         eprintln!("       alloy --disasm <script.ajs|script.js|script.ax>");
         eprintln!("       alloy --emit-ax <script.ajs> <out.ax>");
@@ -31,10 +37,58 @@ fn main() {
             println!("                                the native extension; plain .js is also");
             println!("                                accepted for compatibility)");
             println!("  alloy <script.ax>             Execute precompiled bytecode");
+            println!("  alloy init [dir]              Initialize a new Alloy project");
+            println!("  alloy add <pkg>               Add an npm dependency to project");
+            println!("  alloy install                 Install dependencies from alloy.json");
+            println!("  alloy test [filter]           Run test suite (*.test.ajs / *.test.js)");
+            println!("  alloy lsp                     Start the Language Server (JSON-RPC over stdio)");
             println!("  alloy --emit-ax <in> <out>    Compile source to .ax bytecode");
             println!("  alloy --bench <script.ajs>    Benchmark execution");
             println!("  alloy --disasm <file>         Disassemble source or bytecode");
             println!("  alloy --version               Print version");
+        }
+        "init" => {
+            let dir = args.get(2).map(|s| s.as_str());
+            if let Err(e) = pkg::init_project(dir) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "add" => {
+            if args.len() < 3 {
+                eprintln!("Usage: alloy add <package-name>");
+                std::process::exit(1);
+            }
+            if let Err(e) = pkg::add_dependency(&args[2]) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "install" => {
+            if let Err(e) = pkg::install_dependencies() {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "test" => {
+            let filter = args.get(2).map(|s| s.as_str());
+            if let Err(e) = pkg::run_tests(filter) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "lsp" => {
+            if let Err(e) = alloy_vm::lsp::run_server_stdio() {
+                eprintln!("alloy lsp error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "run" => {
+            if args.len() < 3 {
+                eprintln!("Usage: alloy run <script.ajs|script.js|script.ax>");
+                std::process::exit(1);
+            }
+            run_file(&args[2]);
         }
         "--emit-ax" => {
             if args.len() < 4 {
@@ -48,21 +102,21 @@ fn main() {
             };
             emit_ax(input, output, module);
         }
-        "--bench" => {
+        "bench" | "--bench" => {
             if args.len() < 3 {
-                eprintln!("Usage: alloy --bench <script.ajs>");
+                eprintln!("Usage: alloy bench <script.ajs>");
                 return;
             }
             bench_file(&args[2]);
         }
-        "--disasm" => {
+        "disasm" | "--disasm" => {
             if args.len() < 3 {
-                eprintln!("Usage: alloy --disasm <script.ajs|script.js|script.ax>");
+                eprintln!("Usage: alloy disasm <script.ajs|script.js|script.ax>");
                 return;
             }
             disasm_file(&args[2]);
         }
-        "--repl" => {
+        "repl" | "--repl" => {
             run_repl();
         }
         _ => {
@@ -95,13 +149,15 @@ fn load_program(path: &str) -> Program {
                 std::process::exit(1);
             }
         };
-        match Compiler::compile_source(&source) {
+        let mut program = match Compiler::compile_source(&source) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("compile error: {}", e);
                 std::process::exit(1);
             }
-        }
+        };
+        program.source_file = Some(path.to_string());
+        program
     }
 }
 
@@ -116,6 +172,12 @@ fn run_file(path: &str) {
     vm.set_script_path(path);
     let result = vm.run();
     if let Some(err) = vm.take_error() {
+        if let Some(od) = err.as_object() {
+            if let Some(st) = od.borrow().get("stack").and_then(|s| s.as_str().map(|x| x.to_string())) {
+                eprintln!("{}", st);
+                std::process::exit(1);
+            }
+        }
         eprintln!("uncaught exception: {}", err);
         std::process::exit(1);
     }
@@ -138,7 +200,7 @@ fn emit_ax(input: &str, output: &str, module: bool) {
     // recorded, is_module flag) so `require('./x.ax')` can load it. Default
     // is a main-script program (require refuses it — a loud error instead of
     // silently mis-executing against the wrong frame base).
-    let program = if module {
+    let mut program = if module {
         match Compiler::compile_module(&source) {
             Ok(p) => p,
             Err(e) => {
@@ -155,6 +217,7 @@ fn emit_ax(input: &str, output: &str, module: bool) {
             }
         }
     };
+    program.source_file = Some(input.to_string());
     let bytes = match program.to_bytes() {
         Ok(b) => b,
         Err(e) => {
@@ -224,7 +287,6 @@ fn run_repl() {
     println!("Type 'exit' to quit, 'help' for commands");
     println!();
 
-    let arena = Arena::new(64 * 1024);
     let mut repl_vm: Option<Vm> = None;
     // Accumulated input across lines; evaluated as one program once the
     // brackets balance (loops, functions, and try blocks can span lines).
@@ -260,7 +322,18 @@ fn run_repl() {
                     continue;
                 }
                 "arena" => {
-                    println!("Arena: {}/{} bytes used", arena.used(), arena.capacity());
+                    match &repl_vm {
+                        Some(vm) => {
+                            let (young, old, used, cap) = vm.heap_stats();
+                            println!(
+                                "Arena: {}/{} bytes used (young: {}B, old: {}B)",
+                                used, cap, young, old
+                            );
+                        }
+                        None => {
+                            println!("Arena: 0 bytes used (VM not initialized yet)");
+                        }
+                    }
                     continue;
                 }
                 "" => continue,

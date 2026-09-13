@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: alloy
+            archive_ext: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: alloy
+            archive_ext: tar.gz
+            use_cross: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: alloy
+            archive_ext: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: alloy
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: alloy.exe
+            archive_ext: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (if cross-compiling)
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p alloy-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p alloy-cli
+          fi
+
+      - name: Package release archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BIN_PATH="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          ARCHIVE="alloy-${{ matrix.target }}.${{ matrix.archive_ext }}"
+          tar -czf "$ARCHIVE" -C "$(dirname "$BIN_PATH")" "${{ matrix.artifact_name }}"
+          shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+          echo "ARCHIVE_PATH=$ARCHIVE" >> $GITHUB_ENV
+          echo "CHECKSUM_PATH=${ARCHIVE}.sha256" >> $GITHUB_ENV
+
+      - name: Package release archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $BinPath = "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          $Archive = "alloy-${{ matrix.target }}.${{ matrix.archive_ext }}"
+          Compress-Archive -Path $BinPath -DestinationPath $Archive
+          $Hash = (Get-FileHash -Path $Archive -Algorithm SHA256).Hash.ToLower()
+          "$Hash  $Archive" | Out-File -FilePath "$Archive.sha256" -Encoding ascii
+          echo "ARCHIVE_PATH=$Archive" >> $env:GITHUB_ENV
+          echo "CHECKSUM_PATH=$Archive.sha256" >> $env:GITHUB_ENV
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ARCHIVE_PATH }}
+            ${{ env.CHECKSUM_PATH }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
