@@ -23,12 +23,14 @@ http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.path === '/api/detect') {
         const startTime = Date.now();
 
+        const jsonParseStart = Date.now();
         let input;
         try {
             input = JSON.parse(req.body);
         } catch (e) {
             return res.status(400).json({ error: "Invalid JSON body" });
         }
+        const jsonParseMs = Date.now() - jsonParseStart;
 
         const width = input.width || 512;
         const height = input.height || 512;
@@ -62,16 +64,20 @@ http.createServer(async (req, res) => {
 
         const result = JSON.parse(rawJson);
         const totalDurationMs = Date.now() - startTime;
+        const pythonInferenceMs = result.inference_ms || pyDurationMs;
+        const handoffOverheadMs = Math.max(0.005, Math.round((pyDurationMs - pythonInferenceMs) * 1000) / 1000);
 
         return res.json({
             status: "success",
             detections: result.detections,
             count: result.count,
             metrics: {
-                total_latency_ms: totalDurationMs,
-                python_inference_ms: result.inference_ms || pyDurationMs,
+                total_http_request_ms: totalDurationMs,
+                pure_vision_pipeline_ms: memAllocMs + pyDurationMs,
+                python_inference_ms: pythonInferenceMs,
                 shared_memory_alloc_ms: memAllocMs,
-                zero_copy_handoff_overhead_ms: Math.max(0.003, totalDurationMs - pyDurationMs),
+                zero_copy_handoff_overhead_ms: handoffOverheadMs,
+                json_body_parse_ms: jsonParseMs,
                 frame_resolution: `${width}x${height}`,
                 buffer_bytes: pixels.length * 4
             }
