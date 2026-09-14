@@ -1,7 +1,6 @@
-use std::alloc::{Layout, alloc, dealloc};
-use std::ptr::NonNull;
+use std::alloc::{alloc, dealloc, Layout};
 use std::cell::Cell;
-
+use std::ptr::NonNull;
 
 #[derive(Debug)]
 pub struct Arena {
@@ -46,9 +45,7 @@ impl Arena {
         let aligned = (current + align - 1) & !(align - 1);
 
         if aligned + size > self.capacity {
-            std::alloc::handle_alloc_error(
-                Layout::from_size_align(size, align).unwrap()
-            );
+            std::alloc::handle_alloc_error(Layout::from_size_align(size, align).unwrap());
         }
 
         let ptr = unsafe { self.ptr.as_ptr().add(aligned) as *mut T };
@@ -66,9 +63,7 @@ impl Arena {
         let aligned = (current + align - 1) & !(align - 1);
 
         if aligned + size > self.capacity {
-            std::alloc::handle_alloc_error(
-                Layout::from_size_align(size, align).unwrap()
-            );
+            std::alloc::handle_alloc_error(Layout::from_size_align(size, align).unwrap());
         }
 
         let ptr = unsafe { self.ptr.as_ptr().add(aligned) };
@@ -84,9 +79,7 @@ impl Arena {
         let aligned = (current + align - 1) & !(align - 1);
 
         if aligned + size > self.capacity {
-            std::alloc::handle_alloc_error(
-                Layout::from_size_align(size, align).unwrap()
-            );
+            std::alloc::handle_alloc_error(Layout::from_size_align(size, align).unwrap());
         }
 
         let ptr = unsafe { self.ptr.as_ptr().add(aligned) };
@@ -251,7 +244,8 @@ impl ChunkedArena {
         self.chunks.push(Arena::new(cap));
         self.regions.push(Vec::new());
         // One bit per 8-byte slot: (cap >> 3) slots, 64 per u64 cell.
-        self.dirty.push(vec![Cell::new(0u64); (cap >> 3).div_ceil(64)]);
+        self.dirty
+            .push(vec![Cell::new(0u64); (cap >> 3).div_ceil(64)]);
     }
 
     /// Bump-allocate `value`, returning a pointer that stays valid until the
@@ -395,13 +389,25 @@ impl ChunkedArena {
                     if rem_size > 0 {
                         let rem_addr = addr + rsize;
                         self.free_bins[class_idx(rem_size)].push((rem_addr, rem_size));
-                        regions[idx] = Region { slot: slot as u32, size: child_size as u32, kind: kind as u8 };
+                        regions[idx] = Region {
+                            slot: slot as u32,
+                            size: child_size as u32,
+                            kind: kind as u8,
+                        };
                         regions.insert(
                             idx + 1,
-                            Region { slot: rem_slot, size: rem_size as u32, kind: KIND_FREE as u8 },
+                            Region {
+                                slot: rem_slot,
+                                size: rem_size as u32,
+                                kind: KIND_FREE as u8,
+                            },
                         );
                     } else {
-                        regions[idx] = Region { slot: slot as u32, size: child_size as u32, kind: kind as u8 };
+                        regions[idx] = Region {
+                            slot: slot as u32,
+                            size: child_size as u32,
+                            kind: kind as u8,
+                        };
                     }
                     return Some(addr as *mut u8);
                 }
@@ -427,7 +433,11 @@ impl ChunkedArena {
             Some(v) => v,
             None => {
                 // Debug builds: loud crash so the bug is caught immediately.
-                debug_assert!(false, "[alloy] address {:#x} not in any arena chunk — GC would corrupt chunk 0", addr);
+                debug_assert!(
+                    false,
+                    "[alloy] address {:#x} not in any arena chunk — GC would corrupt chunk 0",
+                    addr
+                );
                 // Release builds: log and return a sentinel that sweep callers
                 // must check. Using (usize::MAX, 0) so no real chunk index
                 // can match — callers that destructure blindly will
@@ -479,7 +489,11 @@ impl ChunkedArena {
                     }
                 } else {
                     if let Some((s, p)) = run.take() {
-                        new_regions.push(Region { slot: s, size: p as u32, kind: KIND_FREE as u8 });
+                        new_regions.push(Region {
+                            slot: s,
+                            size: p as u32,
+                            kind: KIND_FREE as u8,
+                        });
                         let ci_bin = class_idx(p);
                         if new_bins.len() <= ci_bin {
                             new_bins.resize(ci_bin + 1, Vec::new());
@@ -490,7 +504,11 @@ impl ChunkedArena {
                 }
             }
             if let Some((s, p)) = run.take() {
-                new_regions.push(Region { slot: s, size: p as u32, kind: KIND_FREE as u8 });
+                new_regions.push(Region {
+                    slot: s,
+                    size: p as u32,
+                    kind: KIND_FREE as u8,
+                });
                 let ci_bin = class_idx(p);
                 if new_bins.len() <= ci_bin {
                     new_bins.resize(ci_bin + 1, Vec::new());
@@ -575,19 +593,20 @@ impl ChunkedArena {
 
     /// Bytes currently occupied (across chunks, up to the active one).
     pub fn used(&self) -> usize {
-        self.chunks.iter().take(self.active + 1).map(|c| c.used()).sum()
+        self.chunks
+            .iter()
+            .take(self.active + 1)
+            .map(|c| c.used())
+            .sum()
     }
 
     /// Does `addr` fall inside an allocated region of any chunk? (Used by the
     /// escape-analysis pass to tell young-arena values from promoted ones.)
     pub fn contains(&self, addr: usize) -> bool {
-        self.chunks
-            .iter()
-            .take(self.active + 1)
-            .any(|c| {
-                let base = c.ptr() as usize;
-                addr >= base && addr < base + c.used()
-            })
+        self.chunks.iter().take(self.active + 1).any(|c| {
+            let base = c.ptr() as usize;
+            addr >= base && addr < base + c.used()
+        })
     }
 
     /// `(size, kind)` of the region whose payload is at `addr`, or `None`.

@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use hashbrown::HashMap;
-use alloy_core::value::{to_string_js, js_number_to_string, Value};
 use super::strings::js_trim;
+use alloy_core::value::{js_number_to_string, to_string_js, Value};
+use hashbrown::HashMap;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Number.prototype formatting — V8-exact toFixed / toPrecision / toString(radix)
@@ -250,9 +250,7 @@ pub(crate) fn js_to_string_radix(x: f64, radix: u32) -> String {
             frac.push(chars[digit]);
             fraction -= digit as f64;
             // Round to even.
-            if (fraction > 0.5 || (fraction == 0.5 && (digit & 1) == 1))
-                && fraction + delta > 1.0
-            {
+            if (fraction > 0.5 || (fraction == 0.5 && (digit & 1) == 1)) && fraction + delta > 1.0 {
                 // Back-trace already-written digits in case of carry-over.
                 while let Some(&c) = frac.last() {
                     let d = if c > b'9' { c - b'a' + 10 } else { c - b'0' };
@@ -649,9 +647,7 @@ pub(crate) fn js_parse_int(v: &Value, radix: &Value) -> Value {
         (m as u32) as i32
     };
     let rest = &chars[i..];
-    let hex = rest.len() >= 2
-        && rest[0] == '0'
-        && (rest[1] == 'x' || rest[1] == 'X');
+    let hex = rest.len() >= 2 && rest[0] == '0' && (rest[1] == 'x' || rest[1] == 'X');
     let radix = if r32 == 0 {
         if hex {
             i += 2;
@@ -775,7 +771,11 @@ pub(crate) fn make_random() -> Value {
 pub(crate) fn make_math_module() -> Value {
     let unary = |f: fn(f64) -> f64| -> Value {
         Value::native(Arc::new(move |args, _vm| {
-            let x = args.first().cloned().unwrap_or(Value::undefined()).to_number();
+            let x = args
+                .first()
+                .cloned()
+                .unwrap_or(Value::undefined())
+                .to_number();
             num_result(f(x))
         }))
     };
@@ -784,7 +784,11 @@ pub(crate) fn make_math_module() -> Value {
     let abs = unary(f64::abs);
     let sqrt = unary(f64::sqrt);
     let round = Value::native(Arc::new(|args, _vm| {
-        let x = args.first().cloned().unwrap_or(Value::undefined()).to_number();
+        let x = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
         let r = (x + 0.5).floor();
         if r == 0.0 && x < 0.0 {
             Value::number(-0.0)
@@ -793,8 +797,16 @@ pub(crate) fn make_math_module() -> Value {
         }
     }));
     let pow = Value::native(Arc::new(|args, _vm| {
-        let a = args.first().cloned().unwrap_or(Value::undefined()).to_number();
-        let b = args.get(1).cloned().unwrap_or(Value::undefined()).to_number();
+        let a = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
+        let b = args
+            .get(1)
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
         num_result(a.powf(b))
     }));
     let min = Value::native(Arc::new(|args, _vm| {
@@ -825,11 +837,19 @@ pub(crate) fn make_math_module() -> Value {
     }));
     // Extra-unary wrappers that need NaN + zero handling beyond a bare fn.
     let trunc = Value::native(Arc::new(|args, _vm| {
-        let x = args.first().cloned().unwrap_or(Value::undefined()).to_number();
+        let x = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
         num_result(x.trunc())
     }));
     let sign = Value::native(Arc::new(|args, _vm| {
-        let x = args.first().cloned().unwrap_or(Value::undefined()).to_number();
+        let x = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
         if x.is_nan() {
             Value::number(f64::NAN)
         } else if x == 0.0 {
@@ -841,7 +861,11 @@ pub(crate) fn make_math_module() -> Value {
         }
     }));
     let cbrt = Value::native(Arc::new(|args, _vm| {
-        let x = args.first().cloned().unwrap_or(Value::undefined()).to_number();
+        let x = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
         num_result(x.cbrt())
     }));
     let hypot = Value::native(Arc::new(|args, _vm| {
@@ -853,21 +877,45 @@ pub(crate) fn make_math_module() -> Value {
         num_result(acc)
     }));
     let imul = Value::native(Arc::new(|args, _vm| {
-        let a = args.first().cloned().unwrap_or(Value::undefined()).to_number() as u32;
-        let b = args.get(1).cloned().unwrap_or(Value::undefined()).to_number() as u32;
+        let a = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number() as u32;
+        let b = args
+            .get(1)
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number() as u32;
         Value::int((a.wrapping_mul(b)) as i32 as i64)
     }));
     let clz32 = Value::native(Arc::new(|args, _vm| {
-        let x = args.first().cloned().unwrap_or(Value::undefined()).to_number() as u32;
+        let x = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number() as u32;
         Value::int(x.leading_zeros() as i64)
     }));
     let fround = Value::native(Arc::new(|args, _vm| {
-        let x = args.first().cloned().unwrap_or(Value::undefined()).to_number();
+        let x = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
         Value::number(x as f32 as f64)
     }));
     let atan2 = Value::native(Arc::new(|args, _vm| {
-        let y = args.first().cloned().unwrap_or(Value::undefined()).to_number();
-        let x = args.get(1).cloned().unwrap_or(Value::undefined()).to_number();
+        let y = args
+            .first()
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
+        let x = args
+            .get(1)
+            .cloned()
+            .unwrap_or(Value::undefined())
+            .to_number();
         num_result(y.atan2(x))
     }));
     let mut m = HashMap::new();
@@ -875,10 +923,16 @@ pub(crate) fn make_math_module() -> Value {
     m.insert("E".to_string(), Value::number(std::f64::consts::E));
     m.insert("LN10".to_string(), Value::number(std::f64::consts::LN_10));
     m.insert("LN2".to_string(), Value::number(std::f64::consts::LN_2));
-    m.insert("LOG10E".to_string(), Value::number(std::f64::consts::LOG10_E));
+    m.insert(
+        "LOG10E".to_string(),
+        Value::number(std::f64::consts::LOG10_E),
+    );
     m.insert("LOG2E".to_string(), Value::number(std::f64::consts::LOG2_E));
     m.insert("PI".to_string(), Value::number(std::f64::consts::PI));
-    m.insert("SQRT1_2".to_string(), Value::number(std::f64::consts::FRAC_1_SQRT_2));
+    m.insert(
+        "SQRT1_2".to_string(),
+        Value::number(std::f64::consts::FRAC_1_SQRT_2),
+    );
     m.insert("SQRT2".to_string(), Value::number(std::f64::consts::SQRT_2));
     // Unary f64 functions.
     for (name, f) in [

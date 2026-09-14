@@ -26,7 +26,9 @@ impl std::fmt::Display for CompileError {
             Self::UndefinedVariable(s) => write!(f, "undefined variable: {}", s),
             Self::CannotShadowBuiltin(s) => write!(f, "cannot shadow builtin '{}'", s),
             Self::BreakOutsideLoop => write!(f, "break/continue outside of a loop"),
-            Self::AwaitOutsideAsync => write!(f, "'await' is only allowed inside an async function"),
+            Self::AwaitOutsideAsync => {
+                write!(f, "'await' is only allowed inside an async function")
+            }
             Self::UndefinedLabel(s) => write!(f, "undefined label: {}", s),
             Self::ContinueNonLoop(s) => write!(f, "'continue' to non-loop label: {}", s),
             Self::AssignToImport(s) => write!(f, "cannot assign to imported binding '{}'", s),

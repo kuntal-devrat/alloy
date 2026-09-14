@@ -15,9 +15,9 @@ description = "Command-line interface, REPL, package manager, and language serve
 workspace = true
 
 [dependencies]
-alloy-rt = { path = "../alloy-rt", version = "0.1.0" }
-alloy-vm = { path = "../alloy-vm", version = "0.1.0" }
-alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.1.0" }
+alloy-rt = { path = "../alloy-rt", version = "0.2.0" }
+alloy-vm = { path = "../alloy-vm", version = "0.2.0" }
+alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.2.0" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

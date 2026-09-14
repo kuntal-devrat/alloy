@@ -1,10 +1,10 @@
+use alloy_vm::compiler::Compiler;
+use alloy_vm::vm::Vm;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use alloy_vm::compiler::Compiler;
-use alloy_vm::vm::Vm;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlloyManifest {
@@ -21,9 +21,12 @@ fn default_main() -> String {
 }
 
 pub fn init_project(target_dir: Option<&str>) -> Result<(), String> {
-    let dir = target_dir.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let dir = target_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     if !dir.exists() {
-        fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory {:?}: {}", dir, e))?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create directory {:?}: {}", dir, e))?;
     }
 
     let manifest_path = dir.join("alloy.json");
@@ -40,7 +43,7 @@ pub fn init_project(target_dir: Option<&str>) -> Result<(), String> {
 
     let manifest = AlloyManifest {
         name,
-        version: "0.1.0".to_string(),
+        version: "0.2.0".to_string(),
         main: "main.ajs".to_string(),
         dependencies: BTreeMap::new(),
     };
@@ -71,7 +74,7 @@ pub fn add_dependency(pkg_name: &str) -> Result<(), String> {
     } else {
         AlloyManifest {
             name: "alloy-app".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.2.0".to_string(),
             main: "main.ajs".to_string(),
             dependencies: BTreeMap::new(),
         }
@@ -92,20 +95,46 @@ pub fn add_dependency(pkg_name: &str) -> Result<(), String> {
         "version": version,
         "main": main_file
     });
-    fs::write(pkg_dir.join("package.json"), serde_json::to_string_pretty(&pkg_json).unwrap())
-        .map_err(|e| format!("Failed to write package.json: {}", e))?;
+    fs::write(
+        pkg_dir.join("package.json"),
+        serde_json::to_string_pretty(&pkg_json).unwrap(),
+    )
+    .map_err(|e| format!("Failed to write package.json: {}", e))?;
+
+    // Validate main_file path to prevent path traversal
+    let clean_main = Path::new(&main_file);
+    if clean_main.is_absolute()
+        || clean_main
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "Package '{}' contains invalid entry path '{}'",
+            pkg_name, main_file
+        ));
+    }
+
+    let entry_path = pkg_dir.join(&main_file);
+    if let Some(parent) = entry_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {:?}: {}", parent, e))?;
+    }
 
     // Write main entry file
-    fs::write(pkg_dir.join(&main_file), code)
-        .map_err(|e| format!("Failed to write {}: {}", main_file, e))?;
+    fs::write(&entry_path, code).map_err(|e| format!("Failed to write {}: {}", main_file, e))?;
 
-    manifest.dependencies.insert(pkg_name.to_string(), format!("^{}", version));
+    manifest
+        .dependencies
+        .insert(pkg_name.to_string(), format!("^{}", version));
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("Failed to serialize manifest: {}", e))?;
     fs::write(manifest_path, manifest_json)
         .map_err(|e| format!("Failed to update alloy.json: {}", e))?;
 
-    println!("+ {}@{} (installed in node_modules/{})", pkg_name, version, pkg_name);
+    println!(
+        "+ {}@{} (installed in node_modules/{})",
+        pkg_name, version, pkg_name
+    );
     Ok(())
 }
 
@@ -117,8 +146,8 @@ pub fn install_dependencies() -> Result<(), String> {
 
     let content = fs::read_to_string(manifest_path)
         .map_err(|e| format!("Failed to read alloy.json: {}", e))?;
-    let manifest: AlloyManifest = serde_json::from_str(&content)
-        .map_err(|e| format!("Invalid alloy.json: {}", e))?;
+    let manifest: AlloyManifest =
+        serde_json::from_str(&content).map_err(|e| format!("Invalid alloy.json: {}", e))?;
 
     if manifest.dependencies.is_empty() {
         println!("No dependencies found in alloy.json");
@@ -144,17 +173,31 @@ fn fetch_package_metadata_and_entry(pkg: &str) -> Result<(String, String, String
 
     match resp {
         Ok(r) => {
-            let body_str = r.into_string().map_err(|e| format!("Failed to read registry response: {}", e))?;
-            let meta: serde_json::Value = serde_json::from_str(&body_str).map_err(|e| format!("Failed to parse registry response: {}", e))?;
-            let latest = meta["dist-tags"]["latest"].as_str().unwrap_or("1.0.0").to_string();
+            let body_str = r
+                .into_string()
+                .map_err(|e| format!("Failed to read registry response: {}", e))?;
+            let meta: serde_json::Value = serde_json::from_str(&body_str)
+                .map_err(|e| format!("Failed to parse registry response: {}", e))?;
+            let latest = meta["dist-tags"]["latest"]
+                .as_str()
+                .unwrap_or("1.0.0")
+                .to_string();
             let version_data = &meta["versions"][&latest];
-            let main = version_data["main"].as_str().unwrap_or("index.js").to_string();
+            let main = version_data["main"]
+                .as_str()
+                .unwrap_or("index.js")
+                .to_string();
 
             // Try to fetch package content from unpkg or jsDelivr
             let cdn_url = format!("https://unpkg.com/{}@{}/{}", pkg, latest, main);
             let code = match agent.get(&cdn_url).call() {
-                Ok(cr) => cr.into_string().unwrap_or_else(|_| format!("module.exports = {};\n", pkg)),
-                Err(_) => format!("// Package: {}\nmodule.exports = {{ name: \"{}\", version: \"{}\" }};\n", pkg, pkg, latest),
+                Ok(cr) => cr
+                    .into_string()
+                    .unwrap_or_else(|_| format!("module.exports = {};\n", pkg)),
+                Err(_) => format!(
+                    "// Package: {}\nmodule.exports = {{ name: \"{}\", version: \"{}\" }};\n",
+                    pkg, pkg, latest
+                ),
             };
 
             Ok((latest, main, code))
@@ -263,7 +306,11 @@ fn collect_test_files(dir: &Path, files: &mut Vec<PathBuf>) {
 
         if path.is_dir() {
             // Skip node_modules, .git, target, dist
-            if file_name == "node_modules" || file_name == ".git" || file_name == "target" || file_name == "dist" {
+            if file_name == "node_modules"
+                || file_name == ".git"
+                || file_name == "target"
+                || file_name == "dist"
+            {
                 continue;
             }
             collect_test_files(&path, files);
@@ -300,7 +347,10 @@ mod tests {
         assert_eq!(parsed.name, "test-pkg");
         assert_eq!(parsed.version, "1.2.3");
         assert_eq!(parsed.main, "index.ajs");
-        assert_eq!(parsed.dependencies.get("express"), Some(&"^4.18.2".to_string()));
+        assert_eq!(
+            parsed.dependencies.get("express"),
+            Some(&"^4.18.2".to_string())
+        );
     }
 
     #[test]
@@ -314,4 +364,3 @@ mod tests {
         assert!(!is_test_file("test.txt"));
     }
 }
-

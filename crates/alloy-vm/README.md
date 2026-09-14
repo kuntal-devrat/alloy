@@ -14,7 +14,7 @@ Compiler, virtual machine, and Cranelift JIT engine for the [Alloy](https://gith
 
 ```toml
 [dependencies]
-alloy-vm = "0.1.0"
+alloy-vm = "0.2.0"
 ```
 
 ## License

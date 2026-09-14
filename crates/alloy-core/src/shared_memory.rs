@@ -165,13 +165,11 @@ fn sweep_stale_segments() {
     }
     let stats = sweep_stale_segments_inner(&std::env::temp_dir());
     LAST_SWEEP_FILES.store(stats.files, Ordering::Relaxed);
-    LAST_SWEEP_BYTES.store(stats.bytes, Ordering::Relaxed);
-    // Rate-limited to once per interval, so this fires at most once per
-    // sweep — operators see a one-line report only when there is something
-    // to know (a clean startup stays silent).
-    if stats.files > 0 {
+    // Only report orphan reclaims when ALLOY_TRACE is enabled so normal
+    // terminal runs and Ctrl+C cycles remain completely silent and clean.
+    if stats.files > 0 && std::env::var("ALLOY_TRACE").is_ok() {
         eprintln!(
-            "[alloy] reclaimed {} orphaned shared-segment file(s) from crashed runs ({} bytes total)",
+            "[alloy] reclaimed {} orphaned shared-segment file(s) ({} bytes total)",
             stats.files, stats.bytes
         );
     }
@@ -263,7 +261,9 @@ fn map_file(file: &std::fs::File, capacity: usize) -> Result<*mut u8, String> {
 
 #[cfg(unix)]
 fn unmap_file(ptr: *mut u8, capacity: usize) {
-    unsafe { libc::munmap(ptr as *mut libc::c_void, capacity); }
+    unsafe {
+        libc::munmap(ptr as *mut libc::c_void, capacity);
+    }
 }
 
 #[cfg(windows)]
@@ -303,7 +303,61 @@ fn map_file(file: &std::fs::File, capacity: usize) -> Result<*mut u8, String> {
 fn unmap_file(ptr: *mut u8, _capacity: usize) {
     use windows_sys::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
     unsafe {
-        UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: ptr as *mut core::ffi::c_void });
+        UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+            Value: ptr as *mut core::ffi::c_void,
+        });
+    }
+}
+
+static ACTIVE_SEGMENTS: std::sync::Mutex<Vec<(std::path::PathBuf, usize, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+static HANDLER_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn register_active_segment(path: std::path::PathBuf, capacity: usize, ptr: *mut u8) {
+    ensure_ctrlc_cleanup_installed();
+    if let Ok(mut lock) = ACTIVE_SEGMENTS.lock() {
+        lock.push((path, capacity, ptr as usize));
+    }
+}
+
+fn unregister_active_segment(path: &std::path::Path) {
+    if let Ok(mut lock) = ACTIVE_SEGMENTS.lock() {
+        lock.retain(|(p, _, _)| p != path);
+    }
+}
+
+fn cleanup_active_segments() {
+    if let Ok(mut lock) = ACTIVE_SEGMENTS.lock() {
+        for (p, cap, ptr_addr) in lock.drain(..) {
+            unmap_file(ptr_addr as *mut u8, cap);
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+fn ensure_ctrlc_cleanup_installed() {
+    if HANDLER_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        unsafe extern "system" fn ctrl_handler(
+            _ctrl_type: u32,
+        ) -> windows_sys::Win32::Foundation::BOOL {
+            cleanup_active_segments();
+            0 // FALSE: allow default process termination after our cleanup
+        }
+        SetConsoleCtrlHandler(Some(ctrl_handler), 1);
+    }
+    #[cfg(unix)]
+    unsafe {
+        unsafe extern "C" fn sig_handler(_sig: libc::c_int) {
+            cleanup_active_segments();
+            libc::_exit(130);
+        }
+        libc::signal(libc::SIGINT, sig_handler as _);
+        libc::signal(libc::SIGTERM, sig_handler as _);
     }
 }
 
@@ -338,6 +392,7 @@ impl SidecarMemory {
         // as non-shareable).
         if let Ok((file, path)) = create_temp_segment(capacity) {
             if let Ok(ptr) = map_file(&file, capacity) {
+                register_active_segment(path.clone(), capacity, ptr);
                 return Self {
                     ptr: NonNull::new(ptr).unwrap(),
                     capacity,
@@ -383,7 +438,10 @@ impl SidecarMemory {
         // CAS loop to avoid TOCTOU: claim space atomically with ring-buffer wrap-around.
         loop {
             let offset = self.write_offset.load(Ordering::Acquire);
-            let (target_offset, new_off) = if offset + len <= self.capacity {
+            let (target_offset, new_off) = if offset
+                .checked_add(len)
+                .is_some_and(|end| end <= self.capacity)
+            {
                 (offset, offset + len)
             } else if len <= self.capacity {
                 (0, len)
@@ -393,7 +451,11 @@ impl SidecarMemory {
                     available: self.capacity,
                 });
             };
-            if self.write_offset.compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            if self
+                .write_offset
+                .compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 unsafe {
                     let dst = self.ptr.as_ptr().add(target_offset);
                     std::ptr::copy_nonoverlapping(data.as_ptr(), dst, len);
@@ -404,7 +466,10 @@ impl SidecarMemory {
     }
 
     pub fn read(&self, offset: usize, len: usize) -> Result<&[u8], SharedMemoryError> {
-        if offset + len > self.capacity {
+        let end = offset
+            .checked_add(len)
+            .ok_or(SharedMemoryError::OutOfBounds { offset, len })?;
+        if end > self.capacity {
             return Err(SharedMemoryError::OutOfBounds { offset, len });
         }
 
@@ -421,7 +486,10 @@ impl SidecarMemory {
     /// `&mut [u8]`, so the borrow checker enforces that no other reference
     /// into the segment is live while this slice exists.
     pub fn read_mut(&mut self, offset: usize, len: usize) -> Result<&mut [u8], SharedMemoryError> {
-        if offset + len > self.capacity {
+        let end = offset
+            .checked_add(len)
+            .ok_or(SharedMemoryError::OutOfBounds { offset, len })?;
+        if end > self.capacity {
             return Err(SharedMemoryError::OutOfBounds { offset, len });
         }
 
@@ -439,8 +507,11 @@ impl SidecarMemory {
     pub fn bump(&self, size: usize) -> Result<usize, SharedMemoryError> {
         loop {
             let offset = self.write_offset.load(Ordering::Acquire);
-            let aligned = (offset + 7) & !7;
-            let (target_offset, new_off) = if aligned + size <= self.capacity {
+            let aligned = (offset.saturating_add(7)) & !7;
+            let (target_offset, new_off) = if aligned
+                .checked_add(size)
+                .is_some_and(|end| end <= self.capacity)
+            {
                 (aligned, aligned + size)
             } else if size <= self.capacity {
                 (0, size)
@@ -450,7 +521,11 @@ impl SidecarMemory {
                     available: self.capacity,
                 });
             };
-            if self.write_offset.compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            if self
+                .write_offset
+                .compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 return Ok(target_offset);
             }
         }
@@ -468,8 +543,11 @@ impl SidecarMemory {
         let align = std::mem::align_of::<T>().max(4);
         loop {
             let offset = self.write_offset.load(Ordering::Acquire);
-            let aligned = (offset + align - 1) & !(align - 1);
-            let (target_offset, new_off) = if aligned + byte_len <= self.capacity {
+            let aligned = (offset.saturating_add(align - 1)) & !(align - 1);
+            let (target_offset, new_off) = if aligned
+                .checked_add(byte_len)
+                .is_some_and(|end| end <= self.capacity)
+            {
                 (aligned, aligned + byte_len)
             } else if byte_len <= self.capacity {
                 (0, byte_len)
@@ -479,7 +557,11 @@ impl SidecarMemory {
                     available: self.capacity,
                 });
             };
-            if self.write_offset.compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            if self
+                .write_offset
+                .compare_exchange_weak(offset, new_off, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 unsafe {
                     let dst = self.ptr.as_ptr().add(target_offset);
                     let src = values.as_ptr() as *const u8;
@@ -492,12 +574,24 @@ impl SidecarMemory {
 
     /// Generic typed-slice read with alignment + bounds validation.
     fn get_typed_slice<T>(&self, offset: usize, count: usize) -> Result<&[T], SharedMemoryError> {
-        let byte_len = count * std::mem::size_of::<T>();
+        let byte_len =
+            count
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or(SharedMemoryError::OutOfBounds {
+                    offset,
+                    len: usize::MAX,
+                })?;
         if !offset.is_multiple_of(std::mem::align_of::<T>()) {
             return Err(SharedMemoryError::Unaligned { offset });
         }
-        if offset + byte_len > self.capacity {
-            return Err(SharedMemoryError::OutOfBounds { offset, len: byte_len });
+        if offset
+            .checked_add(byte_len)
+            .is_none_or(|end| end > self.capacity)
+        {
+            return Err(SharedMemoryError::OutOfBounds {
+                offset,
+                len: byte_len,
+            });
         }
         unsafe {
             let ptr = self.ptr.as_ptr().add(offset) as *const T;
@@ -519,8 +613,14 @@ impl SidecarMemory {
         if !offset.is_multiple_of(std::mem::align_of::<T>()) {
             return Err(SharedMemoryError::Unaligned { offset });
         }
-        if offset + byte_len > self.capacity {
-            return Err(SharedMemoryError::OutOfBounds { offset, len: byte_len });
+        if offset
+            .checked_add(byte_len)
+            .is_none_or(|end| end > self.capacity)
+        {
+            return Err(SharedMemoryError::OutOfBounds {
+                offset,
+                len: byte_len,
+            });
         }
         unsafe {
             let ptr = self.ptr.as_ptr().add(offset) as *mut T;
@@ -529,11 +629,19 @@ impl SidecarMemory {
         Ok(())
     }
 
-    pub fn get_float64_slice(&self, offset: usize, count: usize) -> Result<&[f64], SharedMemoryError> {
+    pub fn get_float64_slice(
+        &self,
+        offset: usize,
+        count: usize,
+    ) -> Result<&[f64], SharedMemoryError> {
         self.get_typed_slice(offset, count)
     }
 
-    pub fn get_int32_slice(&self, offset: usize, count: usize) -> Result<&[i32], SharedMemoryError> {
+    pub fn get_int32_slice(
+        &self,
+        offset: usize,
+        count: usize,
+    ) -> Result<&[i32], SharedMemoryError> {
         self.get_typed_slice(offset, count)
     }
 
@@ -583,13 +691,20 @@ impl SidecarMemory {
         Ok(())
     }
 
-    pub fn get_float32_slice(&self, offset: usize, count: usize) -> Result<&[f32], SharedMemoryError> {
+    pub fn get_float32_slice(
+        &self,
+        offset: usize,
+        count: usize,
+    ) -> Result<&[f32], SharedMemoryError> {
         let byte_len = count * std::mem::size_of::<f32>();
         if !offset.is_multiple_of(std::mem::align_of::<f32>()) {
             return Err(SharedMemoryError::Unaligned { offset });
         }
         if offset + byte_len > self.capacity {
-            return Err(SharedMemoryError::OutOfBounds { offset, len: byte_len });
+            return Err(SharedMemoryError::OutOfBounds {
+                offset,
+                len: byte_len,
+            });
         }
 
         unsafe {
@@ -622,11 +737,22 @@ pub enum SharedMemoryError {
 impl std::fmt::Display for SharedMemoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Overflow { requested, available } => {
-                write!(f, "shared memory overflow: requested {} bytes, {} available", requested, available)
+            Self::Overflow {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "shared memory overflow: requested {} bytes, {} available",
+                    requested, available
+                )
             }
             Self::OutOfBounds { offset, len } => {
-                write!(f, "shared memory out of bounds: offset {}, len {}", offset, len)
+                write!(
+                    f,
+                    "shared memory out of bounds: offset {}, len {}",
+                    offset, len
+                )
             }
             Self::Unaligned { offset } => {
                 write!(f, "shared memory unaligned access at offset {}", offset)
@@ -648,6 +774,7 @@ impl Drop for SidecarMemory {
                 unmap_file(self.ptr.as_ptr(), self.capacity);
                 drop(file);
                 if let Some(p) = self.path.take() {
+                    unregister_active_segment(&p);
                     // The children were killed and joined before this drops,
                     // but a child's handle can take a moment to fully release
                     // on Windows. Retry briefly with backoff so a clean drop
@@ -737,7 +864,10 @@ mod tests {
         let recycled = dir.join(format!("alloy_shm_{}_555555555_0.tmp", std::process::id()));
         std::fs::write(&recycled, b"x").unwrap();
         {
-            let f = std::fs::File::options().write(true).open(&recycled).unwrap();
+            let f = std::fs::File::options()
+                .write(true)
+                .open(&recycled)
+                .unwrap();
             let _ = f.set_times(std::fs::FileTimes::new().set_modified(old));
         }
         let stats = sweep_stale_segments_inner(&dir);

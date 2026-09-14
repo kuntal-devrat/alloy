@@ -1,7 +1,7 @@
-use alloy_core::heap::{ArenaHeap, HeapGuard, PromoteMap};
-use alloy_core::value::{Value, sweep_young, walk_value};
-use std::collections::HashMap;
 use crate::opcode::Opcode;
+use alloy_core::heap::{ArenaHeap, HeapGuard, PromoteMap};
+use alloy_core::value::{sweep_young, walk_value, Value};
+use std::collections::HashMap;
 
 /// Big-endian i32 read from a bytecode buffer (the compiler's imm encoding).
 #[inline]
@@ -125,8 +125,7 @@ fn jump_target_offset(op: Opcode) -> Option<usize> {
         | Opcode::JumpIfTruePop
         | Opcode::JumpIfNullish
         | Opcode::TryStart => Some(1),
-        Opcode::CmpLocalLocalJumpIfFalsePop
-        | Opcode::CmpLocalLocalJumpIfFalse => Some(4),
+        Opcode::CmpLocalLocalJumpIfFalsePop | Opcode::CmpLocalLocalJumpIfFalse => Some(4),
         Opcode::LoadIndexCmpLocalJumpIfFalsePop => Some(5),
         Opcode::CmpLocalIntJumpIfFalsePop => Some(7),
         Opcode::ArithLocalIntCmpJumpIfFalsePop => Some(12),
@@ -290,8 +289,7 @@ pub(crate) fn op_len(src: &[u8], offset: usize) -> usize {
         | Opcode::AppendStringLocal
         | Opcode::LoadLocalGetPropConst => 4,
         // op + u16 + u16
-        Opcode::MakeArraySpread
-        | Opcode::BinLocalLocalLocalArith => 5,
+        Opcode::MakeArraySpread | Opcode::BinLocalLocalLocalArith => 5,
         // op + u8 + u16 (spread-call: argc byte then a spread mask)
         Opcode::CallSpread
         | Opcode::CallSpreadKeep0
@@ -303,9 +301,7 @@ pub(crate) fn op_len(src: &[u8], offset: usize) -> usize {
         // op + u8 + u16 + u8
         Opcode::AppendStringConst => 5,
         // op + u8 + u8 + u8
-        Opcode::CmpLocalInt
-        | Opcode::BinLocalInt
-        | Opcode::BinIntLocal => 7,
+        Opcode::CmpLocalInt | Opcode::BinLocalInt | Opcode::BinIntLocal => 7,
         // op + u8 + u32
         Opcode::CompoundIndexConst => 6,
         // op + u8 + u16 + u32
@@ -482,6 +478,10 @@ impl Program {
     /// without this every occurrence would allocate a fresh string into the
     /// program's arena.
     pub fn add_constant(&mut self, val: Value) -> u16 {
+        assert!(
+            self.constants.len() < u16::MAX as usize,
+            "too many constants in program"
+        );
         if let Some(s) = val.as_str() {
             if let Some(&i) = self.intern.get(s) {
                 return i;
@@ -1007,9 +1007,10 @@ impl Program {
                             && !targets.contains(&pop_at)
                             && !targets.contains(&c2_at)
                         {
-                            if let Some(l2) =
-                                cmp_len(Opcode::from_u8(*src.get(c2_at).unwrap_or(&0)).unwrap_or(Opcode::Nop))
-                            {
+                            if let Some(l2) = cmp_len(
+                                Opcode::from_u8(*src.get(c2_at).unwrap_or(&0))
+                                    .unwrap_or(Opcode::Nop),
+                            ) {
                                 if e == c2_at + l2 {
                                     let or = j1 == Opcode::JumpIfTrue;
                                     let (fop, fused) = fuse_cmp_chain(&src, i, l1, c2_at, l2, or);
@@ -1028,7 +1029,8 @@ impl Program {
                         let c2_at = j1_at + 5;
                         if !targets.contains(&c2_at) {
                             if let Some(l2) = cmp_len(
-                                Opcode::from_u8(*src.get(c2_at).unwrap_or(&0)).unwrap_or(Opcode::Nop),
+                                Opcode::from_u8(*src.get(c2_at).unwrap_or(&0))
+                                    .unwrap_or(Opcode::Nop),
                             ) {
                                 let j2_at = c2_at + l2;
                                 let j2 = Opcode::from_u8(*src.get(j2_at).unwrap_or(&0))
@@ -1185,10 +1187,8 @@ impl Program {
             write_value(&mut out, c)?;
         }
         out.push(self.is_module as u8);
-        let export_names: Vec<String> =
-            self.exports.iter().map(|(n, _)| n.clone()).collect();
-        let binding_names: Vec<String> =
-            self.exports.iter().map(|(_, b)| b.clone()).collect();
+        let export_names: Vec<String> = self.exports.iter().map(|(n, _)| n.clone()).collect();
+        let binding_names: Vec<String> = self.exports.iter().map(|(_, b)| b.clone()).collect();
         write_str_list(&mut out, &export_names)?;
         write_str_list(&mut out, &binding_names)?;
         out.extend_from_slice(&(self.line_table.len() as u32).to_be_bytes());
@@ -1246,7 +1246,9 @@ impl Program {
         let export_names = r.str_list()?;
         let binding_names = r.str_list()?;
         if export_names.len() != binding_names.len() {
-            return Err(SerError::InvalidFormat("export lists differ in length".to_string()));
+            return Err(SerError::InvalidFormat(
+                "export lists differ in length".to_string(),
+            ));
         }
         program.exports = export_names
             .into_iter()
@@ -1338,7 +1340,11 @@ impl Program {
                     println!();
                     offset += 1;
                 }
-                Opcode::Call | Opcode::CallKeep0 | Opcode::New | Opcode::CallMethod | Opcode::CallMethodKeep0 => {
+                Opcode::Call
+                | Opcode::CallKeep0
+                | Opcode::New
+                | Opcode::CallMethod
+                | Opcode::CallMethodKeep0 => {
                     let argc = self.bytecode[offset + 1];
                     println!("  argc={}", argc);
                     offset += 2;
@@ -1382,7 +1388,10 @@ impl Program {
                     let ks = self.bytecode[offset + 3];
                     let cmp = self.bytecode[offset + 4];
                     let target = self.read_u32(offset + 5);
-                    println!("  r{}[r{}] cmp{} r{} -> {:08x}", objs, idxs, cmp, ks, target);
+                    println!(
+                        "  r{}[r{}] cmp{} r{} -> {:08x}",
+                        objs, idxs, cmp, ks, target
+                    );
                     offset += 9;
                 }
                 Opcode::ArithLocalIntCmpJumpIfFalsePop => {
@@ -1392,7 +1401,10 @@ impl Program {
                     let imm2 = self.read_u32(offset + 7) as i32;
                     let cmp = self.bytecode[offset + 11];
                     let target = self.read_u32(offset + 12);
-                    println!("  (r{} ar{} {}) cmp{} {} -> {:08x}", slot, ar, imm1, cmp, imm2, target);
+                    println!(
+                        "  (r{} ar{} {}) cmp{} {} -> {:08x}",
+                        slot, ar, imm1, cmp, imm2, target
+                    );
                     offset += 16;
                 }
                 Opcode::SetIndexLocalLocal => {
@@ -1472,14 +1484,27 @@ impl Program {
                     let a = self.bytecode[offset + 1];
                     let b = self.bytecode[offset + 2];
                     let ar = self.bytecode[offset + 3];
-                    println!("  r{} {} r{} ar={} keep={}", a, ar & 0x7F, b, ar & 0x7F, ar & 0x80 == 0);
+                    println!(
+                        "  r{} {} r{} ar={} keep={}",
+                        a,
+                        ar & 0x7F,
+                        b,
+                        ar & 0x7F,
+                        ar & 0x80 == 0
+                    );
                     offset += 4;
                 }
                 Opcode::BinIntLocal => {
                     let imm = self.read_u32(offset + 1) as i32;
                     let slot = self.bytecode[offset + 5];
                     let ar = self.bytecode[offset + 6];
-                    println!("  {} ar r{} ar={} keep={}", imm, slot, ar & 0x7F, ar & 0x80 == 0);
+                    println!(
+                        "  {} ar r{} ar={} keep={}",
+                        imm,
+                        slot,
+                        ar & 0x7F,
+                        ar & 0x80 == 0
+                    );
                     offset += 7;
                 }
                 Opcode::BinLocalLocalInt => {
@@ -1592,7 +1617,11 @@ impl Program {
                         let enc_ar = h & 0x1F; // arith_code + 1 (0 = init)
                         let kind = h >> 5;
                         let u = self.read_u32(p + 1);
-                        let imm = if u & 0x8000_0000 != 0 { u as i32 as i64 } else { u as i64 };
+                        let imm = if u & 0x8000_0000 != 0 {
+                            u as i32 as i64
+                        } else {
+                            u as i64
+                        };
                         match kind {
                             0 => print!(
                                 "{}r{}",
@@ -1657,7 +1686,13 @@ impl Program {
                     let slot = self.bytecode[offset + 1];
                     let flags = self.bytecode[offset + 2];
                     let delta = self.bytecode[offset + 3] as i8;
-                    println!("  r{} prefix={} keep={} delta={}", slot, flags & 1, (flags >> 1) & 1, delta);
+                    println!(
+                        "  r{} prefix={} keep={} delta={}",
+                        slot,
+                        flags & 1,
+                        (flags >> 1) & 1,
+                        delta
+                    );
                     offset += 4;
                 }
                 Opcode::AppendStringConst => {
@@ -1691,7 +1726,13 @@ impl Program {
                     let ar = self.bytecode[offset + 1];
                     let pi = self.read_u16(offset + 2);
                     let imm = self.read_u32(offset + 4) as i32;
-                    println!("  prop={} ar={} keep={} rhs={}", pi, ar & 15, (ar >> 4) & 1, imm);
+                    println!(
+                        "  prop={} ar={} keep={} rhs={}",
+                        pi,
+                        ar & 15,
+                        (ar >> 4) & 1,
+                        imm
+                    );
                     offset += 8;
                 }
                 Opcode::PeekProperty => {
@@ -1723,12 +1764,23 @@ impl Program {
                 Opcode::IncPropConst => {
                     let flags = self.bytecode[offset + 1];
                     let pi = self.read_u16(offset + 2);
-                    println!("  prop={} prefix={} dec={} keep={}", pi, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1);
+                    println!(
+                        "  prop={} prefix={} dec={} keep={}",
+                        pi,
+                        flags & 1,
+                        (flags >> 1) & 1,
+                        (flags >> 2) & 1
+                    );
                     offset += 4;
                 }
                 Opcode::IncIndexConst => {
                     let flags = self.bytecode[offset + 1];
-                    println!("  prefix={} dec={} keep={}", flags & 1, (flags >> 1) & 1, (flags >> 2) & 1);
+                    println!(
+                        "  prefix={} dec={} keep={}",
+                        flags & 1,
+                        (flags >> 1) & 1,
+                        (flags >> 2) & 1
+                    );
                     offset += 2;
                 }
                 Opcode::NewClosure => {
@@ -1757,7 +1809,11 @@ impl Program {
                     offset += 3;
                 }
                 Opcode::LoadLocalGetPropConst => {
-                    println!("  local#{} prop#{}", self.bytecode[offset + 1], self.read_u16(offset + 2));
+                    println!(
+                        "  local#{} prop#{}",
+                        self.bytecode[offset + 1],
+                        self.read_u16(offset + 2)
+                    );
                     offset += 4;
                 }
                 Opcode::LoadLocalLocalGetIndex => {
@@ -1997,7 +2053,10 @@ impl<'a> Reader<'a> {
             }
             8 => {
                 let count = self.u32()? as usize;
-                let mut m = hashbrown::HashMap::with_capacity_and_hasher(count.min(1024), Default::default());
+                let mut m = hashbrown::HashMap::with_capacity_and_hasher(
+                    count.min(1024),
+                    Default::default(),
+                );
                 for _ in 0..count {
                     let k = self.str()?;
                     let v = self.value()?;

@@ -1,6 +1,6 @@
-use std::sync::{Arc, Mutex};
 use alloy_core::regex::{self, RegexCompiled};
 use alloy_core::value::{to_string_js, RegexState, Value, VmHost};
+use std::sync::{Arc, Mutex};
 
 /// JS `String.prototype.trim` whitespace: the WhiteSpace + LineTerminator set
 /// (`\u0009-\u000D`, `\u0020`, `\u00A0`, `\u1680`, `\u2000-\u200A`,
@@ -10,7 +10,6 @@ use alloy_core::value::{to_string_js, RegexState, Value, VmHost};
 pub(crate) fn js_trim(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}')
 }
-
 
 /// First index of `needle` in `hay` at or after `from` (char positions, like
 /// JS indexOf operates on code units — for the ASCII corpus both agree). An
@@ -206,13 +205,20 @@ pub(crate) fn regex_exec_core(st: &Arc<Mutex<RegexState>>, arg: &Value) -> Regex
 /// `index` (UTF-16), and `input`. Object-shaped rather than array-shaped
 /// (the engine has no getter-backed array subtypes) — element reads, length,
 /// index and input all work; spread/`Array.isArray` do not (documented).
-pub(crate) fn regex_exec_value(st: &Arc<Mutex<RegexState>>, arg: &Value, vm: &mut dyn VmHost) -> Value {
+pub(crate) fn regex_exec_value(
+    st: &Arc<Mutex<RegexState>>,
+    arg: &Value,
+    vm: &mut dyn VmHost,
+) -> Value {
     let out = regex_exec_core(st, arg);
     let m = match out.matched {
         Ok(Some(m)) => m,
         Ok(None) => return Value::null(),
         Err(e) => {
-            vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+            vm.throw_exception(Value::string(format!(
+                "SyntaxError: Invalid regular expression: {}",
+                e
+            )));
             return Value::null();
         }
     };
@@ -240,7 +246,10 @@ pub(crate) fn regex_exec_value(st: &Arc<Mutex<RegexState>>, arg: &Value, vm: &mu
 /// The regex value's own property surface: read-only flags, `lastIndex`
 /// (mutable), and the exec/test/toString methods.
 pub(crate) fn regex_prop(obj: &Value, name: &str) -> Value {
-    let st = obj.as_regex().expect("regex_prop called on a regex").clone();
+    let st = obj
+        .as_regex()
+        .expect("regex_prop called on a regex")
+        .clone();
     let static_val = {
         let g = st.lock().unwrap_or_else(|g| g.into_inner());
         match name {
@@ -269,7 +278,10 @@ pub(crate) fn regex_prop(obj: &Value, name: &str) -> Value {
             match regex_exec_core(&st, &arg).matched {
                 Ok(m) => Value::bool(m.is_some()),
                 Err(e) => {
-                    vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+                    vm.throw_exception(Value::string(format!(
+                        "SyntaxError: Invalid regular expression: {}",
+                        e
+                    )));
                     Value::bool(false)
                 }
             }
@@ -362,7 +374,10 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                         Ok(Some(_)) => true,
                         Ok(None) => false,
                         Err(e) => {
-                            vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+                            vm.throw_exception(Value::string(format!(
+                                "SyntaxError: Invalid regular expression: {}",
+                                e
+                            )));
                             return Value::undefined();
                         }
                     };
@@ -378,7 +393,10 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                 let scan_res = match regex::scan_all(&prog, &hay) {
                     Ok(ms) => ms,
                     Err(e) => {
-                        vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+                        vm.throw_exception(Value::string(format!(
+                            "SyntaxError: Invalid regular expression: {}",
+                            e
+                        )));
                         return Value::undefined();
                     }
                 };
@@ -530,7 +548,9 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                 return Value::string(String::new());
             }
             len = len.min(n - start);
-            let out: String = chars[start as usize..(start + len) as usize].iter().collect();
+            let out: String = chars[start as usize..(start + len) as usize]
+                .iter()
+                .collect();
             Value::string(out)
         })),
         "includes" => Value::native(Arc::new(move |args, _vm| {
@@ -807,7 +827,10 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                             Value::array(texts)
                         }
                         Err(e) => {
-                            vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+                            vm.throw_exception(Value::string(format!(
+                                "SyntaxError: Invalid regular expression: {}",
+                                e
+                            )));
                             Value::null()
                         }
                     }
@@ -851,7 +874,10 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                 Ok(Some(m)) => Value::int(regex::char_pos_to_utf16(&hay, m.start) as i64),
                 Ok(None) => Value::int(-1),
                 Err(e) => {
-                    vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+                    vm.throw_exception(Value::string(format!(
+                        "SyntaxError: Invalid regular expression: {}",
+                        e
+                    )));
                     Value::int(-1)
                 }
             }
@@ -870,9 +896,19 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                 let global = prog.flags.global;
                 let matches: Vec<regex::Match> = if global {
                     match regex::scan_all(&prog, &hay) {
-                        Ok(ms) => ms.into_iter().map(|(a, b, caps)| regex::Match { start: a, end: b, caps }).collect(),
+                        Ok(ms) => ms
+                            .into_iter()
+                            .map(|(a, b, caps)| regex::Match {
+                                start: a,
+                                end: b,
+                                caps,
+                            })
+                            .collect(),
                         Err(e) => {
-                            vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+                            vm.throw_exception(Value::string(format!(
+                                "SyntaxError: Invalid regular expression: {}",
+                                e
+                            )));
                             return Value::undefined();
                         }
                     }
@@ -881,7 +917,10 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                         Ok(Some(m)) => vec![m],
                         Ok(None) => Vec::new(),
                         Err(e) => {
-                            vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+                            vm.throw_exception(Value::string(format!(
+                                "SyntaxError: Invalid regular expression: {}",
+                                e
+                            )));
                             return Value::undefined();
                         }
                     }
@@ -1010,9 +1049,7 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                 return Value::undefined();
             }
             let u = units[i as usize];
-            let cp: u32 = if (0xD800..=0xDBFF).contains(&u)
-                && (i as usize) + 1 < units.len()
-            {
+            let cp: u32 = if (0xD800..=0xDBFF).contains(&u) && (i as usize) + 1 < units.len() {
                 let lo = units[i as usize + 1];
                 if (0xDC00..=0xDFFF).contains(&lo) {
                     0x10000 + ((u - 0xD800) as u32) * 0x400 + (lo - 0xDC00) as u32
@@ -1047,9 +1084,7 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                 return Value::string(String::new());
             }
             if n < 0.0 || n.is_infinite() {
-                vm.throw_exception(Value::string(
-                    "RangeError: Invalid count value".to_string(),
-                ));
+                vm.throw_exception(Value::string("RangeError: Invalid count value".to_string()));
                 return Value::undefined();
             }
             let count = n.floor() as usize;
@@ -1069,7 +1104,11 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
             let i = match args.first() {
                 Some(v) => {
                     let x = v.to_number();
-                    if x.is_nan() { 0 } else { x.trunc() as i64 }
+                    if x.is_nan() {
+                        0
+                    } else {
+                        x.trunc() as i64
+                    }
                 }
                 None => 0,
             };
@@ -1116,9 +1155,19 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
                     g.compiled.clone()
                 };
                 let matches: Vec<regex::Match> = match regex::scan_all(&prog, &hay) {
-                    Ok(ms) => ms.into_iter().map(|(a, b, caps)| regex::Match { start: a, end: b, caps }).collect(),
+                    Ok(ms) => ms
+                        .into_iter()
+                        .map(|(a, b, caps)| regex::Match {
+                            start: a,
+                            end: b,
+                            caps,
+                        })
+                        .collect(),
                     Err(e) => {
-                        vm.throw_exception(Value::string(format!("SyntaxError: Invalid regular expression: {}", e)));
+                        vm.throw_exception(Value::string(format!(
+                            "SyntaxError: Invalid regular expression: {}",
+                            e
+                        )));
                         return Value::undefined();
                     }
                 };
@@ -1232,7 +1281,10 @@ pub(crate) fn string_prop(obj: &Value, name: &str) -> Value {
         })),
         "\0sym_1" => Value::native(Arc::new(move |_args, _vm| {
             let str_val = s.as_str().unwrap_or("");
-            let chars: Vec<Value> = str_val.chars().map(|c| Value::string(c.to_string())).collect();
+            let chars: Vec<Value> = str_val
+                .chars()
+                .map(|c| Value::string(c.to_string()))
+                .collect();
             super::arrays::make_array_iterator(chars)
         })),
         _ => Value::undefined(),
@@ -1244,7 +1296,11 @@ pub(crate) fn make_string_module() -> Value {
         let mut out = String::new();
         for a in args {
             let n = a.to_number();
-            let n = if n.is_nan() || n <= 0.0 { 0.0 } else { n.trunc() };
+            let n = if n.is_nan() || n <= 0.0 {
+                0.0
+            } else {
+                n.trunc()
+            };
             let n = ((n as i64) & 0xFFFF) as u32;
             if let Some(c) = char::from_u32(n) {
                 out.push(c);
@@ -1273,18 +1329,25 @@ pub(crate) fn make_string_module() -> Value {
     let raw = Value::native(Arc::new(|args, vm| {
         let template = args.first().cloned().unwrap_or(Value::undefined());
         if template.is_null() || template.is_undefined() {
-            vm.throw_exception(Value::string("TypeError: Cannot convert undefined or null to object".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Cannot convert undefined or null to object".to_string(),
+            ));
             return Value::undefined();
         }
         let raw_val = if let Some(od) = template.as_object() {
-            od.borrow().get("raw").cloned().unwrap_or(Value::undefined())
+            od.borrow()
+                .get("raw")
+                .cloned()
+                .unwrap_or(Value::undefined())
         } else {
             Value::undefined()
         };
         let raw_arr = match raw_val.as_array() {
             Some(a) => a.borrow().to_values(),
             None => {
-                vm.throw_exception(Value::string("TypeError: Cannot convert undefined or null to object".to_string()));
+                vm.throw_exception(Value::string(
+                    "TypeError: Cannot convert undefined or null to object".to_string(),
+                ));
                 return Value::undefined();
             }
         };
@@ -1306,11 +1369,9 @@ pub(crate) fn make_string_module() -> Value {
     // Callable `String(x)` coercion plus statics (`String.fromCharCode`,
     // `String.fromCodePoint`, `String.raw`) on the same value via native props.
     Value::native_with_props(
-        Arc::new(move |args, _vm| {
-            match args.first() {
-                Some(v) => Value::string(to_string_js(v)),
-                None => Value::string(String::new()),
-            }
+        Arc::new(move |args, _vm| match args.first() {
+            Some(v) => Value::string(to_string_js(v)),
+            None => Value::string(String::new()),
         }),
         Value::undefined(),
         vec![

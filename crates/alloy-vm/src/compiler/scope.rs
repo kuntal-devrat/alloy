@@ -110,13 +110,55 @@ pub const DEFAULT_EXPORT: &str = "\0default";
 pub fn is_native(name: &str) -> bool {
     matches!(
         name,
-        "print" | "http" | "memory" | "fs" | "Promise" | "setTimeout" | "setInterval"
-            | "clearTimeout" | "clearInterval" | "queueMicrotask" | "console" | "channel"
-            | "spawn" | "Date" | "Math" | "JSON" | "Number" | "Object" | "Array" | "String"
-            | "parseInt" | "parseFloat" | "isNaN" | "require" | "reload" | "sweepSegments"
-            | "fetchSync" | "crypto" | "URL" | "encodeURIComponent" | "decodeURIComponent"
-            | "encodeURI" | "decodeURI" | "btoa" | "atob"
-            | "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError"
-            | "EvalError" | "URIError" | "NaN" | "Infinity"
+        "print"
+            | "http"
+            | "memory"
+            | "fs"
+            | "Promise"
+            | "setTimeout"
+            | "setInterval"
+            | "clearTimeout"
+            | "clearInterval"
+            | "queueMicrotask"
+            | "console"
+            | "channel"
+            | "spawn"
+            | "Date"
+            | "Math"
+            | "JSON"
+            | "Number"
+            | "Object"
+            | "Array"
+            | "String"
+            | "parseInt"
+            | "parseFloat"
+            | "isNaN"
+            | "require"
+            | "reload"
+            | "sweepSegments"
+            | "fetchSync"
+            | "crypto"
+            | "URL"
+            | "encodeURIComponent"
+            | "decodeURIComponent"
+            | "encodeURI"
+            | "decodeURI"
+            | "btoa"
+            | "atob"
+            | "Error"
+            | "TypeError"
+            | "RangeError"
+            | "ReferenceError"
+            | "SyntaxError"
+            | "EvalError"
+            | "URIError"
+            | "NaN"
+            | "Infinity"
     )
+}
+
+/// Identifiers that cannot be declared/shadowed via lexical declaration (`let`/`const`).
+/// Immutable constants and core root constructor.
+pub fn is_protected_decl(name: &str) -> bool {
+    matches!(name, "NaN" | "Infinity" | "Object")
 }

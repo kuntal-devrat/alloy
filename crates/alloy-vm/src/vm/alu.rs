@@ -1,7 +1,7 @@
-use crate::opcode::Opcode;
-use alloy_core::value::Value;
 use super::builtins::containers::container_pairs;
 use super::stack::{OperandStack, KIND_INT, KIND_NUMBER};
+use crate::opcode::Opcode;
+use alloy_core::value::Value;
 
 /// Expand spread positions in a value list (in source order): each position
 /// whose mask bit is set holds an array whose elements are spliced in place.
@@ -135,7 +135,8 @@ pub(crate) fn alu_local_imm(stack: &OperandStack, idx: usize, imm: i64, ar: u8) 
     if idx < stack.len() {
         match stack.kind_of(idx) {
             KIND_INT => {
-                if let Some(res) = chain_arith_i64(Value::int_bits_raw(stack.at(idx).bits()), imm, ar)
+                if let Some(res) =
+                    chain_arith_i64(Value::int_bits_raw(stack.at(idx).bits()), imm, ar)
                 {
                     return (res, true);
                 }
@@ -157,7 +158,8 @@ pub(crate) fn alu_imm_local(stack: &OperandStack, idx: usize, imm: i64, ar: u8) 
     if idx < stack.len() {
         match stack.kind_of(idx) {
             KIND_INT => {
-                if let Some(res) = chain_arith_i64(imm, Value::int_bits_raw(stack.at(idx).bits()), ar)
+                if let Some(res) =
+                    chain_arith_i64(imm, Value::int_bits_raw(stack.at(idx).bits()), ar)
                 {
                     return (res, true);
                 }

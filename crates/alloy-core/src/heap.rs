@@ -140,7 +140,10 @@ impl ArenaHeap {
         match self.try_promote_box(addr) {
             Some(p) => p,
             None => {
-                eprintln!("[alloy] promote_box: no region record for {:#x} — returning null sentinel", addr);
+                eprintln!(
+                    "[alloy] promote_box: no region record for {:#x} — returning null sentinel",
+                    addr
+                );
                 0
             }
         }
@@ -351,7 +354,10 @@ mod tests {
         assert!(std::ptr::eq(current_heap(), &a));
         drop(g1);
         // Outside any guard: the thread fallback heap.
-        assert!(std::ptr::eq(current_heap(), THREAD_HEAP.with(|h| h.as_ptr())));
+        assert!(std::ptr::eq(
+            current_heap(),
+            THREAD_HEAP.with(|h| h.as_ptr())
+        ));
     }
 
     #[test]

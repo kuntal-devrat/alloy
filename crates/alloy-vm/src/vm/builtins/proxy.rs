@@ -1,16 +1,25 @@
-use std::sync::Arc;
 use alloy_core::value::Value;
+use std::sync::Arc;
 
 pub(crate) fn make_proxy_ctor() -> Value {
     let ctor = Value::native(Arc::new(|args, vm| {
         let target = args.first().cloned().unwrap_or(Value::undefined());
         let handler = args.get(1).cloned().unwrap_or(Value::undefined());
-        if !target.is_object() && !target.is_array() && !target.is_function() && !target.is_native() && !target.is_proxy() {
-            vm.throw_exception(Value::string("TypeError: Cannot create proxy with a non-object as target or handler".to_string()));
+        if !target.is_object()
+            && !target.is_array()
+            && !target.is_function()
+            && !target.is_native()
+            && !target.is_proxy()
+        {
+            vm.throw_exception(Value::string(
+                "TypeError: Cannot create proxy with a non-object as target or handler".to_string(),
+            ));
             return Value::undefined();
         }
         if !handler.is_object() && !handler.is_function() && !handler.is_native() {
-            vm.throw_exception(Value::string("TypeError: Cannot create proxy with a non-object as target or handler".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Cannot create proxy with a non-object as target or handler".to_string(),
+            ));
             return Value::undefined();
         }
         Value::proxy(target, handler)
@@ -19,12 +28,21 @@ pub(crate) fn make_proxy_ctor() -> Value {
     let revocable = Value::native(Arc::new(|args, vm| {
         let target = args.first().cloned().unwrap_or(Value::undefined());
         let handler = args.get(1).cloned().unwrap_or(Value::undefined());
-        if !target.is_object() && !target.is_array() && !target.is_function() && !target.is_native() && !target.is_proxy() {
-            vm.throw_exception(Value::string("TypeError: Cannot create proxy with a non-object as target or handler".to_string()));
+        if !target.is_object()
+            && !target.is_array()
+            && !target.is_function()
+            && !target.is_native()
+            && !target.is_proxy()
+        {
+            vm.throw_exception(Value::string(
+                "TypeError: Cannot create proxy with a non-object as target or handler".to_string(),
+            ));
             return Value::undefined();
         }
         if !handler.is_object() && !handler.is_function() && !handler.is_native() {
-            vm.throw_exception(Value::string("TypeError: Cannot create proxy with a non-object as target or handler".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Cannot create proxy with a non-object as target or handler".to_string(),
+            ));
             return Value::undefined();
         }
         let proxy_val = Value::proxy(target, handler);
@@ -40,9 +58,7 @@ pub(crate) fn make_proxy_ctor() -> Value {
         Value::object(obj)
     }));
 
-    let statics = vec![
-        ("revocable".to_string(), revocable),
-    ];
+    let statics = vec![("revocable".to_string(), revocable)];
 
     Value::native_with_props(
         match ctor.as_native() {
@@ -59,7 +75,9 @@ pub(crate) fn make_reflect_module() -> Value {
         let target = args.first().cloned().unwrap_or(Value::undefined());
         let prop = args.get(1).cloned().unwrap_or(Value::undefined());
         if !target.is_object() && !target.is_array() && !target.is_proxy() {
-            vm.throw_exception(Value::string("TypeError: Reflect.get called on non-object".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Reflect.get called on non-object".to_string(),
+            ));
             return Value::undefined();
         }
         if let Some(s) = prop.as_str() {
@@ -81,7 +99,9 @@ pub(crate) fn make_reflect_module() -> Value {
         let prop = args.get(1).cloned().unwrap_or(Value::undefined());
         let val = args.get(2).cloned().unwrap_or(Value::undefined());
         if !target.is_object() && !target.is_array() && !target.is_proxy() {
-            vm.throw_exception(Value::string("TypeError: Reflect.set called on non-object".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Reflect.set called on non-object".to_string(),
+            ));
             return Value::bool(false);
         }
         if let Some(od) = target.as_object() {
@@ -102,7 +122,9 @@ pub(crate) fn make_reflect_module() -> Value {
         let target = args.first().cloned().unwrap_or(Value::undefined());
         let prop = args.get(1).cloned().unwrap_or(Value::undefined());
         if !target.is_object() && !target.is_array() && !target.is_proxy() {
-            vm.throw_exception(Value::string("TypeError: Reflect.has called on non-object".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Reflect.has called on non-object".to_string(),
+            ));
             return Value::bool(false);
         }
         if let Some(od) = target.as_object() {
@@ -121,7 +143,9 @@ pub(crate) fn make_reflect_module() -> Value {
         let target = args.first().cloned().unwrap_or(Value::undefined());
         let prop = args.get(1).cloned().unwrap_or(Value::undefined());
         if !target.is_object() && !target.is_array() && !target.is_proxy() {
-            vm.throw_exception(Value::string("TypeError: Reflect.deleteProperty called on non-object".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Reflect.deleteProperty called on non-object".to_string(),
+            ));
             return Value::bool(false);
         }
         if let Some(od) = target.as_object() {
@@ -139,7 +163,9 @@ pub(crate) fn make_reflect_module() -> Value {
     let own_keys = Value::native(Arc::new(|args, vm| {
         let target = args.first().cloned().unwrap_or(Value::undefined());
         if !target.is_object() && !target.is_array() && !target.is_proxy() {
-            vm.throw_exception(Value::string("TypeError: Reflect.ownKeys called on non-object".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Reflect.ownKeys called on non-object".to_string(),
+            ));
             return Value::undefined();
         }
         if let Some(od) = target.as_object() {
@@ -163,7 +189,9 @@ pub(crate) fn make_reflect_module() -> Value {
         let this_arg = args.get(1).cloned().unwrap_or(Value::undefined());
         let arg_list = args.get(2).cloned().unwrap_or(Value::undefined());
         if !target.is_function() && !target.is_native() {
-            vm.throw_exception(Value::string("TypeError: Reflect.apply called on non-function".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Reflect.apply called on non-function".to_string(),
+            ));
             return Value::undefined();
         }
         let rest: Vec<Value> = if let Some(arr) = arg_list.as_array() {
@@ -182,7 +210,9 @@ pub(crate) fn make_reflect_module() -> Value {
     let get_proto = Value::native(Arc::new(|args, vm| {
         let target = args.first().cloned().unwrap_or(Value::undefined());
         if !target.is_object() && !target.is_array() {
-            vm.throw_exception(Value::string("TypeError: Reflect.getPrototypeOf called on non-object".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Reflect.getPrototypeOf called on non-object".to_string(),
+            ));
             return Value::undefined();
         }
         if let Some(od) = target.as_object() {
@@ -195,7 +225,9 @@ pub(crate) fn make_reflect_module() -> Value {
         let target = args.first().cloned().unwrap_or(Value::undefined());
         let proto = args.get(1).cloned().unwrap_or(Value::undefined());
         if !target.is_object() && !target.is_array() {
-            vm.throw_exception(Value::string("TypeError: Reflect.setPrototypeOf called on non-object".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Reflect.setPrototypeOf called on non-object".to_string(),
+            ));
             return Value::bool(false);
         }
         if let Some(od) = target.as_object() {

@@ -33,7 +33,7 @@ Verify your installation:
 
 ```bash
 alloy --version
-# Output: alloy 0.1.0
+# Output: alloy 0.2.0
 ```
 
 ---
@@ -66,7 +66,7 @@ alloy repl
 ```
 
 ```
-alloy v0.1.0 REPL (type 'exit' to quit)
+alloy v0.2.0 REPL (type 'exit' to quit)
 alloy> const x = 42;
 alloy> x * 2
 84

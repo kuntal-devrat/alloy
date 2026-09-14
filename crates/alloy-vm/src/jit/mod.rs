@@ -3,7 +3,8 @@ pub mod compiler;
 use crate::bytecode::Program;
 use hashbrown::HashMap;
 
-pub type JitLoopFn = unsafe extern "C" fn(slots_ptr: *mut u64, slots_len: u64, max_trips: u64) -> u64;
+pub type JitLoopFn =
+    unsafe extern "C" fn(slots_ptr: *mut u64, slots_len: u64, max_trips: u64) -> u64;
 
 pub struct JitEngine {
     compiler: compiler::JitCompiler,

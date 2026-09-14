@@ -4,11 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use hashbrown::HashMap;
 
-use alloy_core::value::{Value, VmHost};
 use crate::bytecode::Program;
 use crate::compiler::Compiler;
+use alloy_core::value::{Value, VmHost};
 
-use super::core::{FRAME_BUDGET, MAX_COMPILED_MODULES, MAX_PY_TRACKED_MODULES, ModuleGlobals, STACK_SIZE, Vm};
+use super::core::{
+    ModuleGlobals, Vm, FRAME_BUDGET, MAX_COMPILED_MODULES, MAX_PY_TRACKED_MODULES, STACK_SIZE,
+};
 use super::ops_async::ThrowResult;
 use super::stack::CallFrame;
 
@@ -275,7 +277,7 @@ impl Vm {
         if base.is_file() {
             return Some(canon(base));
         }
-        for ext in ["ajs", "ax"] {
+        for ext in ["ajs", "ax", "js", "json"] {
             let p = base.with_extension(ext);
             if p.is_file() {
                 return Some(canon(&p));
@@ -289,7 +291,7 @@ impl Vm {
                     return Some(found);
                 }
             }
-            for name in ["index.ajs", "index.ax"] {
+            for name in ["index.ajs", "index.ax", "index.js", "index.json"] {
                 let p = base.join(name);
                 if p.is_file() {
                     return Some(canon(&p));
@@ -344,15 +346,50 @@ impl Vm {
     /// object (Node's builtin modules), cached so it's a singleton.
     pub(crate) fn require_builtin(&mut self, path: &str) -> Option<Value> {
         const BUILTINS: &[&str] = &[
-            "fs", "http", "memory", "channel", "Promise", "Date", "Math", "JSON",
-            "Number", "Object", "Array", "String", "console", "setTimeout",
-            "setInterval", "clearTimeout", "clearInterval", "queueMicrotask",
-            "parseInt", "parseFloat", "isNaN", "Error", "TypeError", "RangeError",
-            "ReferenceError", "SyntaxError", "EvalError", "URIError", "fetchSync",
-            "crypto", "URL", "encodeURIComponent", "decodeURIComponent",
-            "encodeURI", "decodeURI", "btoa", "atob",
+            "fs",
+            "path",
+            "process",
+            "http",
+            "memory",
+            "channel",
+            "Promise",
+            "Date",
+            "Math",
+            "JSON",
+            "Number",
+            "Object",
+            "Array",
+            "String",
+            "console",
+            "setTimeout",
+            "setInterval",
+            "clearTimeout",
+            "clearInterval",
+            "queueMicrotask",
+            "parseInt",
+            "parseFloat",
+            "isNaN",
+            "Error",
+            "TypeError",
+            "RangeError",
+            "ReferenceError",
+            "SyntaxError",
+            "EvalError",
+            "URIError",
+            "fetchSync",
+            "crypto",
+            "URL",
+            "encodeURIComponent",
+            "decodeURIComponent",
+            "encodeURI",
+            "decodeURI",
+            "btoa",
+            "atob",
         ];
-        let name = path.strip_prefix("alloy:").unwrap_or(path);
+        let name = path
+            .strip_prefix("node:")
+            .or_else(|| path.strip_prefix("alloy:"))
+            .unwrap_or(path);
         if !BUILTINS.contains(&name) {
             return None;
         }
@@ -450,7 +487,9 @@ impl Vm {
         if base_slot + FRAME_BUDGET > STACK_SIZE {
             self.requiring.pop();
             self.current_dir = saved_dir;
-            self.throw_exception(Value::string("RangeError: require stack overflow".to_string()));
+            self.throw_exception(Value::string(
+                "RangeError: require stack overflow".to_string(),
+            ));
             return Value::undefined();
         }
         let saved_stack = self.stack.save_from(0);
@@ -494,7 +533,25 @@ impl Vm {
             };
             map.insert(name.clone(), v);
         }
-        let exports = Value::object(map);
+        let mut exports = Value::object(map);
+        // CommonJS support: if module.exports was populated and no ESM named exports exist, or for JSON modules
+        if let Some(idx) = self.programs[pid as usize]
+            .globals
+            .iter()
+            .position(|g| g == "module")
+        {
+            if let Some(mod_val) = self.globals.get(idx) {
+                if let Some(od) = mod_val.as_object() {
+                    if let Some(exp) = od.borrow().get("exports") {
+                        if !exp.is_undefined()
+                            && (canon.ends_with(".json") || exports_pairs.is_empty())
+                        {
+                            exports = exp.clone();
+                        }
+                    }
+                }
+            }
+        }
         self.load_program(saved_program);
         self.cells_stack.truncate(saved_cells);
         self.handlers = saved_handlers;
@@ -520,9 +577,8 @@ impl Vm {
     }
 
     pub(crate) fn load_module_bytes(canon: &str, requested: &str) -> Result<Arc<[u8]>, String> {
-        let bytes = std::fs::read(canon).map_err(|e| {
-            format!("Error: Cannot find module '{}' ({})", requested, e)
-        })?;
+        let bytes = std::fs::read(canon)
+            .map_err(|e| format!("Error: Cannot find module '{}' ({})", requested, e))?;
         if canon.ends_with(".ax") {
             match Program::from_bytes(&bytes) {
                 Ok(p) if p.is_module => Ok(Arc::from(bytes)),
@@ -535,13 +591,21 @@ impl Vm {
                     requested, e
                 )),
             }
+        } else if canon.ends_with(".json") {
+            let src = String::from_utf8(bytes)
+                .map_err(|_| format!("SyntaxError: '{}' is not valid UTF-8 JSON", requested))?;
+            let wrapped = format!("module.exports = {}; export default module.exports;", src);
+            let p = Compiler::compile_module(&wrapped).map_err(|e| {
+                format!("SyntaxError: failed to compile JSON '{}': {}", requested, e)
+            })?;
+            p.to_bytes()
+                .map(Arc::from)
+                .map_err(|e| format!("internal error: cannot serialize '{}': {}", requested, e))
         } else {
-            let src = String::from_utf8(bytes).map_err(|_| {
-                format!("SyntaxError: '{}' is not valid UTF-8 source", requested)
-            })?;
-            let p = Compiler::compile_module(&src).map_err(|e| {
-                format!("SyntaxError: failed to compile '{}': {}", requested, e)
-            })?;
+            let src = String::from_utf8(bytes)
+                .map_err(|_| format!("SyntaxError: '{}' is not valid UTF-8 source", requested))?;
+            let p = Compiler::compile_module(&src)
+                .map_err(|e| format!("SyntaxError: failed to compile '{}': {}", requested, e))?;
             p.to_bytes()
                 .map(Arc::from)
                 .map_err(|e| format!("internal error: cannot serialize '{}': {}", requested, e))

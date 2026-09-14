@@ -170,8 +170,7 @@ impl Lexer {
                                 if self.adv() == Some('u') {
                                     let lo = self.read_hex4()?;
                                     if (0xDC00..=0xDFFF).contains(&lo) {
-                                        let cp =
-                                            0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                                        let cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
                                         s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                                     } else {
                                         self.pos = save;
@@ -594,18 +593,51 @@ impl Lexer {
                 Some(c) => c,
             };
             match ch {
-                '(' => { self.adv(); self.push_tok(start, Token::LParen); }
-                ')' => { self.adv(); self.push_tok(start, Token::RParen); }
-                '{' => { self.adv(); self.push_tok(start, Token::LBrace); }
-                '}' => { self.adv(); self.push_tok(start, Token::RBrace); }
-                '[' => { self.adv(); self.push_tok(start, Token::LBracket); }
-                ']' => { self.adv(); self.push_tok(start, Token::RBracket); }
-                ';' => { self.adv(); self.push_tok(start, Token::Semicolon); }
-                ',' => { self.adv(); self.push_tok(start, Token::Comma); }
-                ':' => { self.adv(); self.push_tok(start, Token::Colon); }
+                '(' => {
+                    self.adv();
+                    self.push_tok(start, Token::LParen);
+                }
+                ')' => {
+                    self.adv();
+                    self.push_tok(start, Token::RParen);
+                }
+                '{' => {
+                    self.adv();
+                    self.push_tok(start, Token::LBrace);
+                }
+                '}' => {
+                    self.adv();
+                    self.push_tok(start, Token::RBrace);
+                }
+                '[' => {
+                    self.adv();
+                    self.push_tok(start, Token::LBracket);
+                }
+                ']' => {
+                    self.adv();
+                    self.push_tok(start, Token::RBracket);
+                }
+                ';' => {
+                    self.adv();
+                    self.push_tok(start, Token::Semicolon);
+                }
+                ',' => {
+                    self.adv();
+                    self.push_tok(start, Token::Comma);
+                }
+                ':' => {
+                    self.adv();
+                    self.push_tok(start, Token::Colon);
+                }
                 '?' => {
                     self.adv();
-                    if self.peek() == Some('.') && !self.src.get(self.pos + 1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    if self.peek() == Some('.')
+                        && !self
+                            .src
+                            .get(self.pos + 1)
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false)
+                    {
                         self.adv();
                         self.push_tok(start, Token::QuestionDot);
                     } else if self.peek() == Some('?') {
@@ -635,25 +667,47 @@ impl Lexer {
                 }
                 '+' => {
                     self.adv();
-                    if self.peek() == Some('+') { self.adv(); self.push_tok(start, Token::PlusPlus); }
-                    else if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::PlusAssign); }
-                    else { self.push_tok(start, Token::Plus); }
+                    if self.peek() == Some('+') {
+                        self.adv();
+                        self.push_tok(start, Token::PlusPlus);
+                    } else if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::PlusAssign);
+                    } else {
+                        self.push_tok(start, Token::Plus);
+                    }
                 }
                 '-' => {
                     self.adv();
-                    if self.peek() == Some('-') { self.adv(); self.push_tok(start, Token::MinusMinus); }
-                    else if self.peek() == Some('>') { self.adv(); self.push_tok(start, Token::Arrow); }
-                    else if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::MinusAssign); }
-                    else { self.push_tok(start, Token::Minus); }
+                    if self.peek() == Some('-') {
+                        self.adv();
+                        self.push_tok(start, Token::MinusMinus);
+                    } else if self.peek() == Some('>') {
+                        self.adv();
+                        self.push_tok(start, Token::Arrow);
+                    } else if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::MinusAssign);
+                    } else {
+                        self.push_tok(start, Token::Minus);
+                    }
                 }
                 '*' => {
                     self.adv();
                     if self.peek() == Some('*') {
                         self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::StarStarAssign); }
-                        else { self.push_tok(start, Token::StarStar); }
-                    } else if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::StarAssign); }
-                    else { self.push_tok(start, Token::Star); }
+                        if self.peek() == Some('=') {
+                            self.adv();
+                            self.push_tok(start, Token::StarStarAssign);
+                        } else {
+                            self.push_tok(start, Token::StarStar);
+                        }
+                    } else if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::StarAssign);
+                    } else {
+                        self.push_tok(start, Token::Star);
+                    }
                 }
                 '/' => {
                     if self.regex_allowed(self.tokens.last()) {
@@ -661,14 +715,22 @@ impl Lexer {
                         self.push_tok(start, Token::Regex { pattern, flags });
                     } else {
                         self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::SlashAssign); }
-                        else { self.push_tok(start, Token::Slash); }
+                        if self.peek() == Some('=') {
+                            self.adv();
+                            self.push_tok(start, Token::SlashAssign);
+                        } else {
+                            self.push_tok(start, Token::Slash);
+                        }
                     }
                 }
                 '%' => {
                     self.adv();
-                    if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::PercentAssign); }
-                    else { self.push_tok(start, Token::Percent); }
+                    if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::PercentAssign);
+                    } else {
+                        self.push_tok(start, Token::Percent);
+                    }
                 }
                 '=' => {
                     self.adv();
@@ -677,26 +739,46 @@ impl Lexer {
                         self.push_tok(start, Token::Arrow);
                     } else if self.peek() == Some('=') {
                         self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::EqEqEq); }
-                        else { self.push_tok(start, Token::EqEq); }
-                    } else { self.push_tok(start, Token::Assign); }
+                        if self.peek() == Some('=') {
+                            self.adv();
+                            self.push_tok(start, Token::EqEqEq);
+                        } else {
+                            self.push_tok(start, Token::EqEq);
+                        }
+                    } else {
+                        self.push_tok(start, Token::Assign);
+                    }
                 }
                 '!' => {
                     self.adv();
                     if self.peek() == Some('=') {
                         self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::NeqEq); }
-                        else { self.push_tok(start, Token::Neq); }
-                    } else { self.push_tok(start, Token::Not); }
+                        if self.peek() == Some('=') {
+                            self.adv();
+                            self.push_tok(start, Token::NeqEq);
+                        } else {
+                            self.push_tok(start, Token::Neq);
+                        }
+                    } else {
+                        self.push_tok(start, Token::Not);
+                    }
                 }
                 '<' => {
                     self.adv();
                     if self.peek() == Some('<') {
                         self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::ShlAssign); }
-                        else { self.push_tok(start, Token::Shl); }
-                    } else if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::Lte); }
-                    else { self.push_tok(start, Token::Lt); }
+                        if self.peek() == Some('=') {
+                            self.adv();
+                            self.push_tok(start, Token::ShlAssign);
+                        } else {
+                            self.push_tok(start, Token::Shl);
+                        }
+                    } else if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::Lte);
+                    } else {
+                        self.push_tok(start, Token::Lt);
+                    }
                 }
                 '>' => {
                     self.adv();
@@ -704,37 +786,72 @@ impl Lexer {
                         self.adv();
                         if self.peek() == Some('>') {
                             self.adv();
-                            if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::UShrAssign); }
-                            else { self.push_tok(start, Token::UShr); }
-                        } else if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::ShrAssign); }
-                        else { self.push_tok(start, Token::Shr); }
-                    } else if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::Gte); }
-                    else { self.push_tok(start, Token::Gt); }
+                            if self.peek() == Some('=') {
+                                self.adv();
+                                self.push_tok(start, Token::UShrAssign);
+                            } else {
+                                self.push_tok(start, Token::UShr);
+                            }
+                        } else if self.peek() == Some('=') {
+                            self.adv();
+                            self.push_tok(start, Token::ShrAssign);
+                        } else {
+                            self.push_tok(start, Token::Shr);
+                        }
+                    } else if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::Gte);
+                    } else {
+                        self.push_tok(start, Token::Gt);
+                    }
                 }
                 '&' => {
                     self.adv();
                     if self.peek() == Some('&') {
                         self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::AndAssign); }
-                        else { self.push_tok(start, Token::And); }
-                    } else if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::BitAndAssign); }
-                    else { self.push_tok(start, Token::BitAnd); }
+                        if self.peek() == Some('=') {
+                            self.adv();
+                            self.push_tok(start, Token::AndAssign);
+                        } else {
+                            self.push_tok(start, Token::And);
+                        }
+                    } else if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::BitAndAssign);
+                    } else {
+                        self.push_tok(start, Token::BitAnd);
+                    }
                 }
                 '|' => {
                     self.adv();
                     if self.peek() == Some('|') {
                         self.adv();
-                        if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::OrAssign); }
-                        else { self.push_tok(start, Token::Or); }
-                    } else if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::BitOrAssign); }
-                    else { self.push_tok(start, Token::BitOr); }
+                        if self.peek() == Some('=') {
+                            self.adv();
+                            self.push_tok(start, Token::OrAssign);
+                        } else {
+                            self.push_tok(start, Token::Or);
+                        }
+                    } else if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::BitOrAssign);
+                    } else {
+                        self.push_tok(start, Token::BitOr);
+                    }
                 }
                 '^' => {
                     self.adv();
-                    if self.peek() == Some('=') { self.adv(); self.push_tok(start, Token::BitXorAssign); }
-                    else { self.push_tok(start, Token::BitXor); }
+                    if self.peek() == Some('=') {
+                        self.adv();
+                        self.push_tok(start, Token::BitXorAssign);
+                    } else {
+                        self.push_tok(start, Token::BitXor);
+                    }
                 }
-                '~' => { self.adv(); self.push_tok(start, Token::BitNot); }
+                '~' => {
+                    self.adv();
+                    self.push_tok(start, Token::BitNot);
+                }
                 '"' | '\'' => {
                     self.adv();
                     let s = self.read_str(ch)?;
@@ -774,9 +891,15 @@ impl Lexer {
                         }
                     }
                 }
-                _ => { self.adv(); }
+                _ => {
+                    self.adv();
+                }
             }
         }
-        Ok(TokenStream { tokens: std::mem::take(&mut self.tokens), lines: std::mem::take(&mut self.lines), cols: std::mem::take(&mut self.cols) })
+        Ok(TokenStream {
+            tokens: std::mem::take(&mut self.tokens),
+            lines: std::mem::take(&mut self.lines),
+            cols: std::mem::take(&mut self.cols),
+        })
     }
 }

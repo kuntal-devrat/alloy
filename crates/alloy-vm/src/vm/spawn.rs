@@ -2,9 +2,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc};
 
+use crate::bytecode::Program;
 use alloy_core::heap::{ArenaHeap, HeapGuard};
 use alloy_core::value::{FunctionData, PromiseStatus, Value, VmHost};
-use crate::bytecode::Program;
 
 use super::core::Vm;
 use super::modules::{SharedModuleRegistry, SharedPyRegistry};
@@ -69,7 +69,9 @@ impl Vm {
     pub(crate) fn drain_spawn_completions(&mut self) {
         while let Ok((id, bytes)) = self.spawn_rx.try_recv() {
             self.spawn_pending = self.spawn_pending.saturating_sub(1);
-            let Some(p) = self.spawn_inflight.remove(&id) else { continue };
+            let Some(p) = self.spawn_inflight.remove(&id) else {
+                continue;
+            };
             let Some(pr) = p.as_promise() else { continue };
             if bytes.is_empty() {
                 continue;
@@ -224,7 +226,8 @@ fn decode_spawn_value_depth(bytes: &[u8], pos: &mut usize, depth: usize) -> Valu
         }
         8 => {
             let n = (read_u32(bytes, pos) as usize).min(100_000);
-            let mut m = hashbrown::HashMap::with_capacity_and_hasher(n.min(1024), Default::default());
+            let mut m =
+                hashbrown::HashMap::with_capacity_and_hasher(n.min(1024), Default::default());
             for _ in 0..n {
                 if *pos >= bytes.len() {
                     break;
@@ -246,9 +249,21 @@ fn decode_spawn_value_depth(bytes: &[u8], pos: &mut usize, depth: usize) -> Valu
                 if *pos >= bytes.len() {
                     break;
                 }
-                cells.push(Rc::new(RefCell::new(decode_spawn_value_depth(bytes, pos, depth + 1))));
+                cells.push(Rc::new(RefCell::new(decode_spawn_value_depth(
+                    bytes,
+                    pos,
+                    depth + 1,
+                ))));
             }
-            Value::function(FunctionData { program: 0, ptr: entry, params: 0, uses_args: 0, is_generator: false, cells, props: RefCell::new(None) })
+            Value::function(FunctionData {
+                program: 0,
+                ptr: entry,
+                params: 0,
+                uses_args: 0,
+                is_generator: false,
+                cells,
+                props: RefCell::new(None),
+            })
         }
         _ => Value::undefined(),
     }
@@ -309,9 +324,19 @@ pub(crate) fn spawn_worker_inner(
     let mut vm = Vm::new_worker(program, registry, py_registry, dir);
     let heap_ptr: *mut ArenaHeap = &mut vm.heap;
     let _g = HeapGuard::set(heap_ptr);
-    let cells: Vec<Rc<RefCell<Value>>> =
-        upvalues.into_iter().map(|v| Rc::new(RefCell::new(v))).collect();
-    let f = Value::function(FunctionData { program: 0, ptr: entry, params: 0, uses_args: 0, is_generator: false, cells, props: RefCell::new(None) });
+    let cells: Vec<Rc<RefCell<Value>>> = upvalues
+        .into_iter()
+        .map(|v| Rc::new(RefCell::new(v)))
+        .collect();
+    let f = Value::function(FunctionData {
+        program: 0,
+        ptr: entry,
+        params: 0,
+        uses_args: 0,
+        is_generator: false,
+        cells,
+        props: RefCell::new(None),
+    });
     let result = vm.call_value(&f, &args);
     let mut out = Vec::new();
     if let Some(err) = vm.take_error() {

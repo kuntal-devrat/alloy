@@ -1,11 +1,11 @@
+pub mod codegen;
 pub mod error;
-pub mod token;
 pub mod lexer;
 pub mod parser;
 pub mod scope;
-pub mod codegen;
+pub mod token;
 
-pub use error::CompileError;
-pub use token::{Token, TokenStream, TemplatePart};
 pub use codegen::Compiler;
+pub use error::CompileError;
 pub use scope::DEFAULT_EXPORT;
+pub use token::{TemplatePart, Token, TokenStream};

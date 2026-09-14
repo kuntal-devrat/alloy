@@ -65,8 +65,12 @@ impl MessageBus {
         tx
     }
 
-    pub fn channel_count(&self) -> usize { self.channels.len() }
-    pub fn bound(&self) -> usize { self.bound }
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+    pub fn bound(&self) -> usize {
+        self.bound
+    }
 }
 
 impl Default for MessageBus {

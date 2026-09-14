@@ -64,15 +64,18 @@ fn parse_request(buf: &[u8]) -> Option<(HttpRequest, usize)> {
     let _version = parts.next()?;
     let mut headers = Vec::new();
     for line in lines {
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Some((k, v)) = line.split_once(':') {
             headers.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
     // Content-Length
-    let content_length: usize = headers.iter()
-        .find(|(k,_)| k.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_,v)| v.parse().ok())
+    let content_length: usize = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(0);
     if content_length > 10 * 1024 * 1024 {
         return None;
@@ -83,15 +86,24 @@ fn parse_request(buf: &[u8]) -> Option<(HttpRequest, usize)> {
     }
     let body = buf[header_len..total_needed].to_vec();
     let raw = buf[..total_needed].to_vec();
-    Some((HttpRequest { method, path, headers, body, raw }, total_needed))
+    Some((
+        HttpRequest {
+            method,
+            path,
+            headers,
+            body,
+            raw,
+        },
+        total_needed,
+    ))
 }
 
-fn build_response(status: u16, reason: &str, headers: &[(&str,&str)], body: &[u8]) -> Vec<u8> {
+fn build_response(status: u16, reason: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status, reason).as_bytes());
     out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     out.extend_from_slice(b"Connection: keep-alive\r\n");
-    for (k,v) in headers {
+    for (k, v) in headers {
         out.extend_from_slice(format!("{}: {}\r\n", k, v).as_bytes());
     }
     out.extend_from_slice(b"\r\n");
@@ -137,7 +149,10 @@ impl HttpServer {
 
     pub async fn listen(&self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(&self.addr).await?;
-        println!("[alloy] listening on {} (keep_alive={})", self.addr, self.config.keep_alive);
+        println!(
+            "[alloy] listening on {} (keep_alive={})",
+            self.addr, self.config.keep_alive
+        );
         let typed = self.handler.clone();
         let raw = self.raw_handler.clone();
         let cfg = self.config.clone();
@@ -161,14 +176,26 @@ impl HttpServer {
                             h(req)
                         } else if let Some(h) = &raw {
                             // raw handler compat: receives raw bytes
-                            let raw_bytes = buf[consumed..consumed+needed].to_vec();
+                            let raw_bytes = buf[consumed..consumed + needed].to_vec();
                             h(raw_bytes)
                         } else {
-                            build_response(200, "OK", &[("Content-Type","text/plain")], b"Hello, alloy!")
+                            build_response(
+                                200,
+                                "OK",
+                                &[("Content-Type", "text/plain")],
+                                b"Hello, alloy!",
+                            )
                         };
                         // Ensure response is framed; if handler returned only body, frame it
-                        let framed = if response.starts_with(b"HTTP/") { response } else { build_response(200, "OK", &[("Content-Type","text/plain")], &response) };
-                        if timeout(cfg.write_timeout, stream.write_all(&framed)).await.is_err() {
+                        let framed = if response.starts_with(b"HTTP/") {
+                            response
+                        } else {
+                            build_response(200, "OK", &[("Content-Type", "text/plain")], &response)
+                        };
+                        if timeout(cfg.write_timeout, stream.write_all(&framed))
+                            .await
+                            .is_err()
+                        {
                             break 'conn;
                         }
                         if timeout(cfg.write_timeout, stream.flush()).await.is_err() {
@@ -191,12 +218,19 @@ impl HttpServer {
 
                     // Check size limits on unparsed data
                     if buf.len() > cfg.max_header_bytes + cfg.max_body_bytes {
-                        let resp = build_response(413, "Payload Too Large", &[], b"Payload Too Large");
+                        let resp =
+                            build_response(413, "Payload Too Large", &[], b"Payload Too Large");
                         let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
                         break 'conn;
                     }
-                    if buf.len() > cfg.max_header_bytes && !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                        let resp = build_response(431, "Request Header Fields Too Large", &[], b"Header Too Large");
+                    if buf.len() > cfg.max_header_bytes && !buf.windows(4).any(|w| w == b"\r\n\r\n")
+                    {
+                        let resp = build_response(
+                            431,
+                            "Request Header Fields Too Large",
+                            &[],
+                            b"Header Too Large",
+                        );
                         let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
                         break 'conn;
                     }
@@ -224,5 +258,7 @@ impl HttpServer {
 
 // backwards compat helper
 impl Default for HttpServer {
-    fn default() -> Self { Self::new("127.0.0.1:8080") }
+    fn default() -> Self {
+        Self::new("127.0.0.1:8080")
+    }
 }

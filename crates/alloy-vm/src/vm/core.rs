@@ -6,6 +6,8 @@ use std::time::Instant;
 
 use hashbrown::HashMap;
 
+use crate::bytecode::Program;
+use crate::opcode::Opcode;
 use alloy_core::arena::ChunkedArena;
 use alloy_core::heap::{ArenaHeap, HeapGuard};
 use alloy_core::regex::RegexCompiled;
@@ -13,8 +15,6 @@ use alloy_core::shared_memory::SidecarMemory;
 use alloy_core::value::{
     MarkState, PromiseState, PromiseStatus, RcDirtyRef, Value, VmHost, WakeHandle,
 };
-use crate::bytecode::Program;
-use crate::opcode::Opcode;
 
 use super::builtins::{error_ctor_map, is_error_name, seed_global};
 use super::cache::{CallIcEntry, IcPoly, IC_SLOTS};
@@ -422,8 +422,15 @@ impl Vm {
             epoch: Instant::now(),
             handlers: Vec::new(),
             uncaught_exception: None,
-        instruction_budget: match std::env::var("ALLOY_VM_BUDGET").ok().and_then(|s| s.parse::<u64>().ok()) { Some(0) => None, Some(n) => Some(n), None => Some(50_000_000) },
-        budget_exhausted: false,
+            instruction_budget: match std::env::var("ALLOY_VM_BUDGET")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                Some(0) => None,
+                Some(n) => Some(n),
+                None => Some(50_000_000),
+            },
+            budget_exhausted: false,
             native_throw_jump: None,
             // The receiver of the in-flight native call (method natives read
             // their instance from `this_value`). Restored around re-entrant
@@ -561,9 +568,7 @@ impl Vm {
     /// `require('./x.ajs')` paths resolve against it like Node (the CLI calls
     /// this with the main script's path).
     pub fn set_script_path(&mut self, path: &str) {
-        self.current_dir = std::path::Path::new(path)
-            .parent()
-            .map(|p| p.to_path_buf());
+        self.current_dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf());
     }
 
     pub fn get_global(&self, name: &str) -> Option<Value> {
@@ -602,8 +607,9 @@ impl Vm {
         self.budget_exhausted = false;
         let mut result = self.dispatch(0);
         if self.budget_exhausted {
-            self.uncaught_exception =
-                Some(Value::string("Error: instruction budget exhausted".to_string()));
+            self.uncaught_exception = Some(Value::string(
+                "Error: instruction budget exhausted".to_string(),
+            ));
             return result;
         }
         if self.uncaught_exception.is_some() {
@@ -663,7 +669,10 @@ impl Vm {
 
     pub(crate) fn get_frame_location(&self, program_id: u32, pc: usize) -> (String, u32, u32) {
         if let Some(prog) = self.programs.get(program_id as usize) {
-            let file = prog.source_file.clone().unwrap_or_else(|| "<anonymous>".to_string());
+            let file = prog
+                .source_file
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string());
             if let Some((line, col)) = prog.get_location(pc) {
                 (file, line, col)
             } else {
@@ -673,7 +682,6 @@ impl Vm {
             ("<anonymous>".to_string(), 1, 1)
         }
     }
-
 }
 
 impl Drop for Vm {
@@ -691,7 +699,6 @@ impl Drop for Vm {
         }
     }
 }
-
 
 impl VmHost for Vm {
     fn note_box_dirty(&mut self, addr: usize) {
@@ -735,7 +742,9 @@ impl VmHost for Vm {
         };
 
         // Top frame: currently executing function
-        let top_fn = self.call_stack.last()
+        let top_fn = self
+            .call_stack
+            .last()
             .and_then(|cf| self.get_fn_name(&cf.fn_value))
             .unwrap_or_else(|| "<anonymous>".to_string());
         let (file, line, col) = self.get_frame_location(self.program_id, self.current_pc);
@@ -745,12 +754,16 @@ impl VmHost for Vm {
         for (i, cf) in self.call_stack.iter().rev().enumerate() {
             let caller_fn = if i + 1 < self.call_stack.len() {
                 let prev_frame = &self.call_stack[self.call_stack.len() - 2 - i];
-                self.get_fn_name(&prev_frame.fn_value).unwrap_or_else(|| "<anonymous>".to_string())
+                self.get_fn_name(&prev_frame.fn_value)
+                    .unwrap_or_else(|| "<anonymous>".to_string())
             } else {
                 "<anonymous>".to_string()
             };
             let (file, line, col) = self.get_frame_location(cf.return_program, cf.return_addr);
-            out.push_str(&format!("\n    at {} ({}:{}:{})", caller_fn, file, line, col));
+            out.push_str(&format!(
+                "\n    at {} ({}:{}:{})",
+                caller_fn, file, line, col
+            ));
         }
 
         out
@@ -759,8 +772,14 @@ impl VmHost for Vm {
     fn capture_stack_trace(&mut self, target: &Value, constructor_opt: Option<&Value>) {
         let (name, msg) = if let Some(od) = target.as_object() {
             let od = od.borrow();
-            let n = od.get("name").and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_else(|| "Error".to_string());
-            let m = od.get("message").and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+            let n = od
+                .get("name")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "Error".to_string());
+            let m = od
+                .get("message")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
             (n, m)
         } else {
             ("Error".to_string(), String::new())
@@ -768,7 +787,9 @@ impl VmHost for Vm {
 
         let mut frames: Vec<(String, String, u32, u32, Option<Value>)> = Vec::new();
         // Top frame
-        let top_fn = self.call_stack.last()
+        let top_fn = self
+            .call_stack
+            .last()
             .and_then(|cf| self.get_fn_name(&cf.fn_value))
             .unwrap_or_else(|| "<anonymous>".to_string());
         let (file, line, col) = self.get_frame_location(self.program_id, self.current_pc);
@@ -780,7 +801,8 @@ impl VmHost for Vm {
             let (caller_fn, caller_val) = if i + 1 < self.call_stack.len() {
                 let prev_frame = &self.call_stack[self.call_stack.len() - 2 - i];
                 (
-                    self.get_fn_name(&prev_frame.fn_value).unwrap_or_else(|| "<anonymous>".to_string()),
+                    self.get_fn_name(&prev_frame.fn_value)
+                        .unwrap_or_else(|| "<anonymous>".to_string()),
                     Some(prev_frame.fn_value.clone()),
                 )
             } else {
@@ -850,7 +872,14 @@ impl VmHost for Vm {
         VmHost::then(self, &p, callback, None);
     }
 
-    fn python_call(&mut self, src: &str, func: &str, args: &[Value], base: usize, cap: usize) -> Value {
+    fn python_call(
+        &mut self,
+        src: &str,
+        func: &str,
+        args: &[Value],
+        base: usize,
+        cap: usize,
+    ) -> Value {
         self.vm_python_call(src, func, args, base, cap)
     }
 
@@ -960,7 +989,11 @@ impl VmHost for Vm {
             let cells_len = self.cells_stack.len();
             self.cells_stack.push(f.cells.clone());
             let arg_values = if f.uses_args != 0 {
-                Some((0..argc).map(|i| self.stack.at(base_slot + i).clone()).collect())
+                Some(
+                    (0..argc)
+                        .map(|i| self.stack.at(base_slot + i).clone())
+                        .collect(),
+                )
             } else {
                 None
             };

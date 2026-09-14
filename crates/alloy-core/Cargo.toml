@@ -24,4 +24,4 @@ hashbrown.workspace = true
 [target.'cfg(windows)'.dependencies]
 # File-backed shared segment (CreateFileMappingW/MapViewOfFile) so a child
 # Python/C sidecar can map the exact same memory block zero-copy.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_Memory", "Win32_System_Threading"] }

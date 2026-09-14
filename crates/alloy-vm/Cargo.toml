@@ -15,7 +15,7 @@ description = "Register-based bytecode compiler, inline caches, Cranelift JIT en
 workspace = true
 
 [dependencies]
-alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.1.0" }
+alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.2.0" }
 hashbrown.workspace = true
 serde.workspace = true
 serde_json.workspace = true

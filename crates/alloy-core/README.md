@@ -15,7 +15,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-alloy-core = "0.1.0"
+alloy-core = "0.2.0"
 ```
 
 ## License

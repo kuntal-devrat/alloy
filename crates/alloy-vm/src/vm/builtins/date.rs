@@ -1,6 +1,5 @@
-use std::sync::Arc;
 use alloy_core::value::{to_string_js, Value, VmHost};
-
+use std::sync::Arc;
 
 pub(crate) fn date_now_ms() -> f64 {
     std::time::SystemTime::now()
@@ -47,23 +46,14 @@ pub(crate) fn date_ctor_ms(args: &[Value]) -> f64 {
             let get = |i: usize| -> f64 { args.get(i).map(|v| v.to_number()).unwrap_or(0.0) };
             let mut y = get(0);
             let (mo, d, h, mi, s, ms) = (get(1), get(2), get(3), get(4), get(5), get(6));
-            if [y, mo, d, h, mi, s, ms]
-                .iter()
-                .any(|v| !v.is_finite())
-            {
+            if [y, mo, d, h, mi, s, ms].iter().any(|v| !v.is_finite()) {
                 return f64::NAN;
             }
             if (0.0..=99.0).contains(&y) {
                 y += 1900.0;
             }
             alloy_core::value::ms_from_local_components(
-                y as i64,
-                mo as i64,
-                d as i64,
-                h as i64,
-                mi as i64,
-                s as i64,
-                ms as i64,
+                y as i64, mo as i64, d as i64, h as i64, mi as i64, s as i64, ms as i64,
             )
         }
     }
@@ -153,13 +143,13 @@ pub(crate) fn date_getter_native(comp: &str, utc: bool) -> Value {
 
 /// Which local/UTC components a setter replaces, in argument order.
 const DATE_SET_ORDER: &[&[&str]] = &[
-    &["milliseconds"],          // setMilliseconds(ms)
-    &["seconds", "milliseconds"], // setSeconds(s, ms)
-    &["minutes", "seconds", "milliseconds"], // setMinutes(mi, s, ms)
+    &["milliseconds"],                                // setMilliseconds(ms)
+    &["seconds", "milliseconds"],                     // setSeconds(s, ms)
+    &["minutes", "seconds", "milliseconds"],          // setMinutes(mi, s, ms)
     &["hours", "minutes", "seconds", "milliseconds"], // setHours(h, mi, s, ms)
-    &["date"],                 // setDate(d)
-    &["month", "date"],       // setMonth(mo, d)
-    &["year", "month", "date"], // setFullYear(y, mo, d)
+    &["date"],                                        // setDate(d)
+    &["month", "date"],                               // setMonth(mo, d)
+    &["year", "month", "date"],                       // setFullYear(y, mo, d)
 ];
 
 /// Component setters: recompute the stored time from the current components
@@ -214,14 +204,12 @@ pub(crate) fn date_setter_native(order: &[&str], utc: bool) -> Value {
 /// comes from `this` like the Map/Set methods.
 pub(crate) fn date_method_native(name: &str) -> Value {
     match name {
-        "getTime" | "valueOf" => Value::native(Arc::new(|_args, vm| {
-            Value::number(this_date_ms(vm))
-        })),
+        "getTime" | "valueOf" => {
+            Value::native(Arc::new(|_args, vm| Value::number(this_date_ms(vm))))
+        }
         "getTimezoneOffset" => Value::native(Arc::new(|_args, vm| {
             let ms = this_date_ms(vm);
-            Value::number(
-                -(alloy_core::value::local_offset_ms(ms) as f64) / 60_000.0,
-            )
+            Value::number(-(alloy_core::value::local_offset_ms(ms) as f64) / 60_000.0)
         })),
         "getFullYear" => date_getter_native("year", false),
         "getMonth" => date_getter_native("month", false),
@@ -265,9 +253,7 @@ pub(crate) fn date_method_native(name: &str) -> Value {
         "toISOString" => Value::native(Arc::new(|_args, vm| {
             let ms = this_date_ms(vm);
             if !ms.is_finite() {
-                vm.throw_exception(Value::string(
-                    "RangeError: Invalid time value".to_string(),
-                ));
+                vm.throw_exception(Value::string("RangeError: Invalid time value".to_string()));
                 return Value::undefined();
             }
             Value::string(alloy_core::value::date_to_iso_string(ms))
@@ -344,16 +330,50 @@ pub(crate) fn make_date_ctor() -> Value {
         let od = proto.as_object().unwrap();
         let mut od = od.borrow_mut();
         for name in [
-            "getTime", "getFullYear", "getMonth", "getDate", "getDay", "getHours",
-            "getMinutes", "getSeconds", "getMilliseconds", "getTimezoneOffset",
-            "getUTCFullYear", "getUTCMonth", "getUTCDate", "getUTCDay", "getUTCHours",
-            "getUTCMinutes", "getUTCSeconds", "getUTCMilliseconds", "setTime",
-            "setMilliseconds", "setSeconds", "setMinutes", "setHours", "setDate",
-            "setMonth", "setFullYear", "setUTCMilliseconds", "setUTCSeconds",
-            "setUTCMinutes", "setUTCHours", "setUTCDate", "setUTCMonth", "setUTCFullYear",
-            "toString", "toISOString", "toUTCString", "toGMTString", "toDateString",
-            "toTimeString", "toLocaleString", "toLocaleDateString", "toLocaleTimeString",
-            "toJSON", "valueOf",
+            "getTime",
+            "getFullYear",
+            "getMonth",
+            "getDate",
+            "getDay",
+            "getHours",
+            "getMinutes",
+            "getSeconds",
+            "getMilliseconds",
+            "getTimezoneOffset",
+            "getUTCFullYear",
+            "getUTCMonth",
+            "getUTCDate",
+            "getUTCDay",
+            "getUTCHours",
+            "getUTCMinutes",
+            "getUTCSeconds",
+            "getUTCMilliseconds",
+            "setTime",
+            "setMilliseconds",
+            "setSeconds",
+            "setMinutes",
+            "setHours",
+            "setDate",
+            "setMonth",
+            "setFullYear",
+            "setUTCMilliseconds",
+            "setUTCSeconds",
+            "setUTCMinutes",
+            "setUTCHours",
+            "setUTCDate",
+            "setUTCMonth",
+            "setUTCFullYear",
+            "toString",
+            "toISOString",
+            "toUTCString",
+            "toGMTString",
+            "toDateString",
+            "toTimeString",
+            "toLocaleString",
+            "toLocaleDateString",
+            "toLocaleTimeString",
+            "toJSON",
+            "valueOf",
         ] {
             od.set(name, date_method_native(name));
         }
@@ -367,23 +387,14 @@ pub(crate) fn make_date_ctor() -> Value {
         let get = |i: usize| -> f64 { args.get(i).map(|v| v.to_number()).unwrap_or(0.0) };
         let mut y = get(0);
         let (mo, d, h, mi, s, ms) = (get(1), get(2), get(3), get(4), get(5), get(6));
-        if [y, mo, d, h, mi, s, ms]
-            .iter()
-            .any(|v| !v.is_finite())
-        {
+        if [y, mo, d, h, mi, s, ms].iter().any(|v| !v.is_finite()) {
             return Value::number(f64::NAN);
         }
         if (0.0..=99.0).contains(&y) {
             y += 1900.0;
         }
         Value::number(alloy_core::value::ms_from_utc_components(
-            y as i64,
-            mo as i64,
-            d as i64,
-            h as i64,
-            mi as i64,
-            s as i64,
-            ms as i64,
+            y as i64, mo as i64, d as i64, h as i64, mi as i64, s as i64, ms as i64,
         ))
     }));
     let ctor_proto = proto.clone();

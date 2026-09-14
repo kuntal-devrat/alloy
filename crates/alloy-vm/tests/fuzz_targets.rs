@@ -2,7 +2,7 @@ use alloy_core::regex::{compile_from_str, search};
 use alloy_vm::bytecode::Program;
 use alloy_vm::compiler::lexer::Lexer;
 use alloy_vm::compiler::Compiler;
-use alloy_vm::vm::fuzz::{decode_spawn_value, dechunk, parse_http_request_full, parse_json_str};
+use alloy_vm::vm::fuzz::{dechunk, decode_spawn_value, parse_http_request_full, parse_json_str};
 
 // Simple LCG pseudo-random generator for deterministic, reproducible fuzzing without external dependencies
 struct FuzzRng {
@@ -15,7 +15,10 @@ impl FuzzRng {
     }
 
     fn next_u32(&mut self) -> u32 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.state >> 32) as u32
     }
 
@@ -102,21 +105,30 @@ fn test_fuzz_parser() {
 
     // Pathological nesting and syntax cases
     let mut deep_parens = String::new();
-    for _ in 0..200 { deep_parens.push('('); }
+    for _ in 0..200 {
+        deep_parens.push('(');
+    }
     deep_parens.push_str("42");
-    for _ in 0..200 { deep_parens.push(')'); }
+    for _ in 0..200 {
+        deep_parens.push(')');
+    }
 
     let mut deep_arrays = String::new();
-    for _ in 0..200 { deep_arrays.push('['); }
+    for _ in 0..200 {
+        deep_arrays.push('[');
+    }
     deep_arrays.push('1');
-    for _ in 0..200 { deep_arrays.push(']'); }
+    for _ in 0..200 {
+        deep_arrays.push(']');
+    }
 
     let corpus = [
         deep_parens,
         deep_arrays,
         "function f(a = 1, [b, ...c], { d: e = 2 }) { return a + b; }".to_string(),
         "try { throw 1; } catch (e) { try {} finally {} } finally {}".to_string(),
-        "class A extends B { #x = 1; get x() { return this.#x; } set x(v) { this.#x = v; } }".to_string(),
+        "class A extends B { #x = 1; get x() { return this.#x; } set x(v) { this.#x = v; } }"
+            .to_string(),
         "async function* gen() { yield* [1, 2, await 3]; }".to_string(),
         "for (const x of y) { break; continue; }".to_string(),
         "export default class extends null {}".to_string(),
@@ -260,12 +272,25 @@ fn test_fuzz_regex() {
         "\\",
     ];
 
-    let flags_list = ["", "g", "i", "m", "u", "s", "gi", "gims", "invalid_flags", "xyz"];
+    let flags_list = [
+        "",
+        "g",
+        "i",
+        "m",
+        "u",
+        "s",
+        "gi",
+        "gims",
+        "invalid_flags",
+        "xyz",
+    ];
 
     for pat in patterns {
         for flags in flags_list {
             if let Ok(prog) = compile_from_str(pat, flags) {
-                let chars: Vec<char> = "The quick brown fox jumps over 42 lazy dogs.".chars().collect();
+                let chars: Vec<char> = "The quick brown fox jumps over 42 lazy dogs."
+                    .chars()
+                    .collect();
                 let _ = search(&prog, &chars, 0);
                 let chars2: Vec<char> = "".chars().collect();
                 let _ = search(&prog, &chars2, 0);
@@ -297,7 +322,8 @@ fn test_fuzz_http() {
 
     let valid_requests = [
         b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
-        b"POST /api/data HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello".as_slice(),
+        b"POST /api/data HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello"
+            .as_slice(),
         b"GET /test?query=1 HTTP/1.1\r\nUser-Agent: Alloy\r\nAccept: */*\r\n\r\n".as_slice(),
     ];
 

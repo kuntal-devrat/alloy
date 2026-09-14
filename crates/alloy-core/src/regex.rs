@@ -158,9 +158,19 @@ fn is_word(c: char) -> bool {
 fn is_space(c: char) -> bool {
     matches!(
         c,
-        ' ' | '\t' | '\n' | '\u{000B}' | '\u{000C}' | '\r'
-            | '\u{00A0}' | '\u{1680}' | '\u{2028}' | '\u{2029}'
-            | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+        ' ' | '\t'
+            | '\n'
+            | '\u{000B}'
+            | '\u{000C}'
+            | '\r'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
     ) || ('\u{2000}'..='\u{200A}').contains(&c)
 }
 
@@ -309,7 +319,11 @@ impl Parser {
             _ => self.code.push(Inst::Char(c)),
         }
         // Assertions cannot be quantified (`^*`, `\b*` are errors in V8).
-        if assertion && self.peek().is_some_and(|c| matches!(c, '*' | '+' | '?' | '{')) {
+        if assertion
+            && self
+                .peek()
+                .is_some_and(|c| matches!(c, '*' | '+' | '?' | '{'))
+        {
             return Err("nothing to repeat after assertion".to_string());
         }
         self.parse_quantifier(atom_start)
@@ -363,9 +377,7 @@ impl Parser {
                     false
                 }
                 Some('=') | Some('!') | Some('<') => {
-                    return Err(
-                        "lookahead/lookbehind assertions are not supported".to_string(),
-                    )
+                    return Err("lookahead/lookbehind assertions are not supported".to_string())
                 }
                 _ => return Err("invalid group in regular expression".to_string()),
             }
@@ -471,8 +483,13 @@ impl Parser {
                 }
             }
         }
-        self.code
-            .push(Inst::Class { negate, ranges, d, w, s });
+        self.code.push(Inst::Class {
+            negate,
+            ranges,
+            d,
+            w,
+            s,
+        });
         Ok(())
     }
 
@@ -714,7 +731,9 @@ fn match_at(
         if steps > MAX_STEPS {
             return Err(RegexExecError::TooComplex);
         }
-        let Some(inst) = prog.code.get(pc) else { continue };
+        let Some(inst) = prog.code.get(pc) else {
+            continue;
+        };
         let ic = prog.flags.ignore_case;
         match inst {
             Inst::Char(c) => {
@@ -794,16 +813,24 @@ fn match_at(
                 }
             }
             Inst::Start => {
-                let ok = pos == 0
-                    || (prog.flags.multiline && pos > 0 && is_line_term(chars[pos - 1]));
+                let ok =
+                    pos == 0 || (prog.flags.multiline && pos > 0 && is_line_term(chars[pos - 1]));
                 if ok {
-                    stack.push(Thread { pc: pc + 1, pos, caps });
+                    stack.push(Thread {
+                        pc: pc + 1,
+                        pos,
+                        caps,
+                    });
                 }
             }
             Inst::End => {
                 let ok = pos == chars.len() || (prog.flags.multiline && is_line_term(chars[pos]));
                 if ok {
-                    stack.push(Thread { pc: pc + 1, pos, caps });
+                    stack.push(Thread {
+                        pc: pc + 1,
+                        pos,
+                        caps,
+                    });
                 }
             }
             Inst::Save(i) => {
@@ -830,10 +857,15 @@ fn match_at(
                 // Group g lives in slots 2g-1 (start) and 2g (end). A group
                 // that did not participate matches empty (ES spec).
                 let g = *i as usize;
-                match (caps.get(2 * g - 1).and_then(|c| *c), caps.get(2 * g).and_then(|c| *c)) {
+                match (
+                    caps.get(2 * g - 1).and_then(|c| *c),
+                    caps.get(2 * g).and_then(|c| *c),
+                ) {
                     (Some(s), Some(e)) => {
                         let len = e.1.saturating_sub(s.0);
-                        if pos + len <= chars.len() && chars[pos..pos + len] == chars[s.0..s.0 + len] {
+                        if pos + len <= chars.len()
+                            && chars[pos..pos + len] == chars[s.0..s.0 + len]
+                        {
                             stack.push(Thread {
                                 pc: pc + 1,
                                 pos: pos + len,
@@ -841,14 +873,22 @@ fn match_at(
                             });
                         }
                     }
-                    _ => stack.push(Thread { pc: pc + 1, pos, caps }),
+                    _ => stack.push(Thread {
+                        pc: pc + 1,
+                        pos,
+                        caps,
+                    }),
                 }
             }
             Inst::WordBoundary(b) => {
                 let before = pos > 0 && is_word(chars[pos - 1]);
                 let after = pos < chars.len() && is_word(chars[pos]);
                 if (before != after) == *b {
-                    stack.push(Thread { pc: pc + 1, pos, caps });
+                    stack.push(Thread {
+                        pc: pc + 1,
+                        pos,
+                        caps,
+                    });
                 }
             }
             Inst::Match => {
@@ -892,20 +932,23 @@ pub struct Match {
 
 /// Find the first match at or after `start` (char index). When `sticky` is
 /// set, only `start` itself is tried.
-pub fn search(prog: &RegexCompiled, chars: &[char], start: usize) -> Result<Option<Match>, RegexExecError> {
+pub fn search(
+    prog: &RegexCompiled,
+    chars: &[char],
+    start: usize,
+) -> Result<Option<Match>, RegexExecError> {
     let start = start.min(chars.len());
     if prog.flags.sticky {
-        return match_at(prog, chars, start).map(|opt| {
-            opt.map(|(end, caps)| Match {
-                start,
-                end,
-                caps,
-            })
-        });
+        return match_at(prog, chars, start)
+            .map(|opt| opt.map(|(end, caps)| Match { start, end, caps }));
     }
     for s in start..=chars.len() {
         if let Some((end, caps)) = match_at(prog, chars, s)? {
-            return Ok(Some(Match { start: s, end, caps }));
+            return Ok(Some(Match {
+                start: s,
+                end,
+                caps,
+            }));
         }
     }
     Ok(None)
@@ -992,7 +1035,6 @@ mod tests {
         assert_eq!(m("[]", "x"), None);
         assert_eq!(m("[^]", "x"), Some((0, 1)));
     }
-
 
     #[test]
     fn quantifiers() {

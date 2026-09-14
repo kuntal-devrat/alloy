@@ -47,12 +47,13 @@ fn arith_code(op: &str) -> Option<u8> {
         "**" => Some(11),
         _ => None,
     }
-}    /// A step in a fused ArithChain: header byte (`kind << 5 | ar`) + operand.
-    /// Kinds: 0=LoadLocal (operand = slot), 1=Const (operand = i32 imm),
-    /// 2=Save (push acc onto the operand stack), 3=Combine (pop t; acc = t ar
-    /// acc). Chain ar codes are `arith_code + 1` (0 = init): a LoadLocal/Const
-    /// step with ar=0 initializes acc, every other step applies
-    /// `acc = acc ar operand`.
+}
+/// A step in a fused ArithChain: header byte (`kind << 5 | ar`) + operand.
+/// Kinds: 0=LoadLocal (operand = slot), 1=Const (operand = i32 imm),
+/// 2=Save (push acc onto the operand stack), 3=Combine (pop t; acc = t ar
+/// acc). Chain ar codes are `arith_code + 1` (0 = init): a LoadLocal/Const
+/// step with ar=0 initializes acc, every other step applies
+/// `acc = acc ar operand`.
 #[derive(Clone, Copy)]
 struct ChainStep {
     hdr: u8,
@@ -77,9 +78,15 @@ impl Compiler {
     fn chain_leaf(&mut self, e: &Expr) -> Option<ChainStep> {
         match e {
             Expr::Paren(inner) => self.chain_leaf(inner),
-            Expr::Int(v) => Some(ChainStep { hdr: ChainStep::CONST, op: *v }),
+            Expr::Int(v) => Some(ChainStep {
+                hdr: ChainStep::CONST,
+                op: *v,
+            }),
             Expr::Ident(name) => match self.resolve(name) {
-                Resolved::Local(s) => Some(ChainStep { hdr: ChainStep::LOAD, op: s as i64 }),
+                Resolved::Local(s) => Some(ChainStep {
+                    hdr: ChainStep::LOAD,
+                    op: s as i64,
+                }),
                 _ => None,
             },
             _ => None,
@@ -132,9 +139,15 @@ impl Compiler {
                 1
             }
             None => {
-                steps.push(ChainStep { hdr: ChainStep::SAVE, op: 0 });
+                steps.push(ChainStep {
+                    hdr: ChainStep::SAVE,
+                    op: 0,
+                });
                 let sub = self.build_chain(r, steps)?;
-                steps.push(ChainStep { hdr: ChainStep::COMBINE | (ar + 1), op: 0 });
+                steps.push(ChainStep {
+                    hdr: ChainStep::COMBINE | (ar + 1),
+                    op: 0,
+                });
                 sub + 1
             }
         };
@@ -202,18 +215,27 @@ impl Compiler {
             let Some(ar) = arith_code(op.trim_end_matches('=')) else {
                 return false;
             };
-            steps.push(ChainStep { hdr: ChainStep::LOAD, op: s as i64 });
+            steps.push(ChainStep {
+                hdr: ChainStep::LOAD,
+                op: s as i64,
+            });
             match self.chain_leaf(value) {
                 Some(mut st) => {
                     st.hdr |= ar + 1;
                     steps.push(st);
                 }
                 None => {
-                    steps.push(ChainStep { hdr: ChainStep::SAVE, op: 0 });
+                    steps.push(ChainStep {
+                        hdr: ChainStep::SAVE,
+                        op: 0,
+                    });
                     if self.build_chain(value, &mut steps).is_none() {
                         return false;
                     }
-                    steps.push(ChainStep { hdr: ChainStep::COMBINE | (ar + 1), op: 0 });
+                    steps.push(ChainStep {
+                        hdr: ChainStep::COMBINE | (ar + 1),
+                        op: 0,
+                    });
                 }
             }
             if steps.len() > 48 {
@@ -468,10 +490,18 @@ impl Compiler {
                 // top-level global, or native) can't be deleted â€” false. An
                 // undeclared global reference deletes to true (sloppy JS).
                 let bound = self.funcs.last().unwrap().locals.iter().any(|l| l == name)
-                    || self.funcs.iter().skip(1).any(|f| f.locals.iter().any(|l| l == name))
+                    || self
+                        .funcs
+                        .iter()
+                        .skip(1)
+                        .any(|f| f.locals.iter().any(|l| l == name))
                     || self.declared_globals.contains(name)
                     || is_native(name);
-                self.program.emit_op(if bound { Opcode::LoadFalse } else { Opcode::LoadTrue });
+                self.program.emit_op(if bound {
+                    Opcode::LoadFalse
+                } else {
+                    Opcode::LoadTrue
+                });
                 Ok(())
             }
             other => {
@@ -486,7 +516,10 @@ impl Compiler {
 
     /// Run `emit` with the surrounding keep context forced to true (the value
     /// of a sub-expression is always consumed by its parent).
-    fn emit_keep(&mut self, emit: impl FnOnce(&mut Self) -> Result<(), CompileError>) -> Result<(), CompileError> {
+    fn emit_keep(
+        &mut self,
+        emit: impl FnOnce(&mut Self) -> Result<(), CompileError>,
+    ) -> Result<(), CompileError> {
         let saved = self.keep_result;
         self.keep_result = true;
         let r = emit(self);
@@ -572,7 +605,9 @@ impl Compiler {
                 self.emit_cond_true(l, &mut skip)?;
                 self.emit_cond_false(r, exit)?;
                 let after = self.program.bytecode.len();
-                for j in skip { self.patch_jump_to(j, after); }
+                for j in skip {
+                    self.patch_jump_to(j, after);
+                }
             }
             _ => {
                 self.emit_keep(|c| c.emit_expr(e))?;
@@ -597,7 +632,9 @@ impl Compiler {
                 self.emit_cond_false(l, &mut skip)?;
                 self.emit_cond_true(r, body)?;
                 let after = self.program.bytecode.len();
-                for j in skip { self.patch_jump_to(j, after); }
+                for j in skip {
+                    self.patch_jump_to(j, after);
+                }
             }
             _ => {
                 self.emit_keep(|c| c.emit_expr(e))?;
@@ -638,7 +675,12 @@ impl Compiler {
             Stmt::ForOf { body, .. } | Stmt::ForIn { body, .. } => {
                 Self::collect_declared(body, out)
             }
-            Stmt::Try { body, catch, finally, .. } => {
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+                ..
+            } => {
                 Self::collect_declared(body, out);
                 if let Some((_, c)) = catch {
                     Self::collect_declared(c, out);
@@ -666,7 +708,9 @@ impl Compiler {
             Pat::Object(fields) => {
                 for f in fields {
                     match f {
-                        ObjPatElem::Key(_, sub) | ObjPatElem::Computed(_, sub) | ObjPatElem::Rest(sub) => {
+                        ObjPatElem::Key(_, sub)
+                        | ObjPatElem::Computed(_, sub)
+                        | ObjPatElem::Rest(sub) => {
                             Self::collect_pat_names(sub, out);
                         }
                     }
@@ -735,7 +779,7 @@ impl Compiler {
     }
 
     fn global_store_index(&mut self, name: &str) -> Result<u16, CompileError> {
-        if is_native(name) {
+        if is_protected_decl(name) {
             return Err(CompileError::CannotShadowBuiltin(name.to_string()));
         }
         Ok(self.resolve_global(name))
@@ -743,7 +787,14 @@ impl Compiler {
 
     /// Resolve a variable to a local slot, an upvalue index, or a global slot.
     fn resolve(&mut self, name: &str) -> Resolved {
-        if let Some(s) = self.funcs.last().unwrap().locals.iter().rposition(|l| l == name) {
+        if let Some(s) = self
+            .funcs
+            .last()
+            .unwrap()
+            .locals
+            .iter()
+            .rposition(|l| l == name)
+        {
             return Resolved::Local(s as u8);
         }
         if let Some(u) = self.resolve_upvalue(name) {
@@ -766,11 +817,21 @@ impl Compiler {
                 let mut target_is_local = true;
                 for level in (owner + 1)..n {
                     let entry = if target_is_local {
-                        UpvalueRef { name: name.to_string(), kind: UpvalueKind::Local { slot: target_idx } }
+                        UpvalueRef {
+                            name: name.to_string(),
+                            kind: UpvalueKind::Local { slot: target_idx },
+                        }
                     } else {
-                        UpvalueRef { name: name.to_string(), kind: UpvalueKind::Upvalue { index: target_idx } }
+                        UpvalueRef {
+                            name: name.to_string(),
+                            kind: UpvalueKind::Upvalue { index: target_idx },
+                        }
                     };
-                    let idx = match self.funcs[level].upvalues.iter().position(|u| u.name == name) {
+                    let idx = match self.funcs[level]
+                        .upvalues
+                        .iter()
+                        .position(|u| u.name == name)
+                    {
                         Some(i) => i as u8,
                         None => {
                             self.funcs[level].upvalues.push(entry);
@@ -1023,7 +1084,10 @@ impl Compiler {
                         // Loud errors: computed keys/spreads are legal in JS
                         // assignment targets but unsupported here â€” better a
                         // compile error than a silent misparse.
-                        ObjElem::Computed(..) | ObjElem::Spread(..) | ObjElem::Getter(..) | ObjElem::Setter(..) => {
+                        ObjElem::Computed(..)
+                        | ObjElem::Spread(..)
+                        | ObjElem::Getter(..)
+                        | ObjElem::Setter(..) => {
                             return Err(CompileError::UnexpectedToken(
                                 "computed keys and spreads are not supported in destructuring patterns".to_string(),
                             ));
@@ -1172,7 +1236,7 @@ impl Compiler {
     /// Store the value on top of the stack into `name`, creating a local (or
     /// REPL global) if needed â€” the declaration path.
     fn store_declared(&mut self, name: &str) -> Result<(), CompileError> {
-        if is_native(name) {
+        if is_protected_decl(name) {
             return Err(CompileError::CannotShadowBuiltin(name.to_string()));
         }
         if self.top_globals && self.funcs.len() == 1 {
@@ -1219,7 +1283,12 @@ impl Compiler {
     /// Destructure the value stashed in `src_slot` according to `pat`, storing
     /// each bound name. Nested patterns stash their sub-value in a fresh local
     /// before recursing.
-    fn emit_pattern_store(&mut self, pat: &Pat, src_slot: u8, mode: PatStoreMode) -> Result<(), CompileError> {
+    fn emit_pattern_store(
+        &mut self,
+        pat: &Pat,
+        src_slot: u8,
+        mode: PatStoreMode,
+    ) -> Result<(), CompileError> {
         match pat {
             Pat::Bind(name) => {
                 self.program.emit_op(Opcode::LoadLocal);
@@ -1389,13 +1458,20 @@ impl Compiler {
     /// constructor of a derived class) so `super` can resolve it by name.
     /// The `home` slot lives in the enclosing frame, so the normal
     /// CaptureLocal machinery materializes it as a cell at NewClosure time.
-    fn emit_method(&mut self, m: &MethodDef, home: Option<UpvalueKind>) -> Result<(), CompileError> {
+    fn emit_method(
+        &mut self,
+        m: &MethodDef,
+        home: Option<UpvalueKind>,
+    ) -> Result<(), CompileError> {
         let j = self.emit_jump(Opcode::Jump);
         let start = self.program.bytecode.len();
         self.program.record_function_name(start, m.name.clone());
         let mut upvalues = Vec::new();
         if let Some(kind) = home {
-            upvalues.push(UpvalueRef { name: "\u{0}home".to_string(), kind });
+            upvalues.push(UpvalueRef {
+                name: "\u{0}home".to_string(),
+                kind,
+            });
         }
         self.funcs.push(FuncCtx {
             locals: m.params.names(),
@@ -1410,7 +1486,11 @@ impl Compiler {
             self.program.emit_u8(r as u8);
         }
         if m.is_async {
-            self.funcs.last_mut().unwrap().locals.push("\u{0}promise".to_string());
+            self.funcs
+                .last_mut()
+                .unwrap()
+                .locals
+                .push("\u{0}promise".to_string());
             let ps = (self.funcs.last().unwrap().locals.len() - 1) as u8;
             self.program.emit_op(Opcode::NewPromise);
             self.program.emit_u8(ps);
@@ -1432,6 +1512,12 @@ impl Compiler {
         self.program.emit_op(Opcode::LoadUndefined);
         self.program.emit_op(Opcode::Return);
         let ctx = self.funcs.pop().unwrap();
+        if ctx.locals.len() > 255 {
+            return Err(CompileError::UnexpectedToken(format!(
+                "function exceeds maximum limit of 255 local variables (got {})",
+                ctx.locals.len()
+            )));
+        }
         self.patch_jump(j);
         let ci = self.program.add_constant(Value::number(start as f64));
         // Fixed params only: `names` includes the rest param (if any), but
@@ -1457,7 +1543,9 @@ impl Compiler {
             Expr::Paren(inner) => Self::is_optional_chain(inner),
             Expr::Prop { obj, optional, .. } => *optional || Self::is_optional_chain(obj),
             Expr::Index { obj, optional, .. } => *optional || Self::is_optional_chain(obj),
-            Expr::Call { callee, optional, .. } => *optional || Self::is_optional_chain(callee),
+            Expr::Call {
+                callee, optional, ..
+            } => *optional || Self::is_optional_chain(callee),
             _ => false,
         }
     }
@@ -1553,14 +1641,19 @@ impl Compiler {
                     // the chain leaving exactly one value), so the keep=0
                     // call variants never apply here.
                     let has_spread = args.iter().any(|a| a.spread);
-                    let mask = args.iter().enumerate().fold(0u16, |m, (i, a)| {
-                        if a.spread { m | (1 << i) } else { m }
-                    });
-                    let prev_is_member = i > 0
-                        && matches!(
-                            links[i - 1],
-                            Expr::Prop { .. } | Expr::Index { .. }
+                    let mask =
+                        args.iter().enumerate().fold(
+                            0u16,
+                            |m, (i, a)| {
+                                if a.spread {
+                                    m | (1 << i)
+                                } else {
+                                    m
+                                }
+                            },
                         );
+                    let prev_is_member =
+                        i > 0 && matches!(links[i - 1], Expr::Prop { .. } | Expr::Index { .. });
                     if prev_is_member {
                         // Method call: the receiver sits one slot below the
                         // frame base (CallMethod reads it as `this`). The
@@ -1682,8 +1775,11 @@ impl Compiler {
                 self.program.emit_u16(i);
             }
             Expr::Bool(b) => {
-                if *b { self.program.emit_op(Opcode::LoadTrue); }
-                else { self.program.emit_op(Opcode::LoadFalse); }
+                if *b {
+                    self.program.emit_op(Opcode::LoadTrue);
+                } else {
+                    self.program.emit_op(Opcode::LoadFalse);
+                }
             }
             Expr::Null => self.program.emit_op(Opcode::LoadNull),
             Expr::Undef => self.program.emit_op(Opcode::LoadUndefined),
@@ -1896,9 +1992,10 @@ impl Compiler {
                             // stack (operands left pushed). Every operator the
                             // lexer produces must map to an opcode here.
                             other => {
-                                return Err(CompileError::UnexpectedToken(
-                                    format!("unhandled binary operator '{}'", other),
-                                ));
+                                return Err(CompileError::UnexpectedToken(format!(
+                                    "unhandled binary operator '{}'",
+                                    other
+                                )));
                             }
                         }
                     }
@@ -1916,14 +2013,17 @@ impl Compiler {
                 // valid assignment reference.
                 if Self::is_optional_chain(target) {
                     return Err(CompileError::UnexpectedToken(
-                        "invalid assignment target: optional chaining cannot be assigned".to_string(),
+                        "invalid assignment target: optional chaining cannot be assigned"
+                            .to_string(),
                     ));
                 }
                 let keep = self.keep_result;
                 // `(a) = v` is a valid assignment target: unwrap grouping
                 // parens before matching the target shape.
                 let mut target_ref = target.as_ref();
-                while let Expr::Paren(inner) = target_ref { target_ref = inner.as_ref(); }
+                while let Expr::Paren(inner) = target_ref {
+                    target_ref = inner.as_ref();
+                }
                 if *op == "&&=" || *op == "||=" || *op == "??=" {
                     if let Expr::Ident(name) = target_ref {
                         if self.imported_bindings.contains(name) {
@@ -1940,80 +2040,80 @@ impl Compiler {
                             return Err(CompileError::AssignToImport(name.clone()));
                         }
                         match self.resolve(name) {
-                        Resolved::Local(s) => {
-                            // `x = <arith chain>` / `x op= <arith chain>`:
-                            // fuse the whole read-compute-write into ONE
-                            // ArithChain dispatch keeping the int in a
-                            // register (store terminal, no stack round-trip).
-                            if self.try_emit_chain_assign(s, op, value, keep) {
-                                return Ok(());
+                            Resolved::Local(s) => {
+                                // `x = <arith chain>` / `x op= <arith chain>`:
+                                // fuse the whole read-compute-write into ONE
+                                // ArithChain dispatch keeping the int in a
+                                // register (store terminal, no stack round-trip).
+                                if self.try_emit_chain_assign(s, op, value, keep) {
+                                    return Ok(());
+                                }
+                                // `s = s + X` / `s += X`: fuse the whole
+                                // read-add-store into one dispatch, keeping the
+                                // builder box in the local slot between appends.
+                                if self.emit_append_assignment(s, op, value, name, keep)? {
+                                    return Ok(());
+                                }
+                                if let Some(ar) = compound_arith(op) {
+                                    // x op= v: read x, evaluate v (JS order),
+                                    // then fuse the arith + store into one opcode.
+                                    self.program.emit_op(Opcode::LoadLocal);
+                                    self.program.emit_u8(s);
+                                    self.emit_keep(|c| c.emit_expr(value))?;
+                                    self.program.emit_op(Opcode::ArithStoreLocal);
+                                    self.program.emit_u8(s);
+                                    self.program.emit_u8(ar);
+                                    self.program.emit_u8(keep as u8);
+                                } else {
+                                    self.emit_keep(|c| c.emit_expr(value))?;
+                                    if keep {
+                                        self.program.emit_op(Opcode::Dup);
+                                    }
+                                    self.program.emit_op(Opcode::StoreLocal);
+                                    self.program.emit_u8(s);
+                                }
                             }
-                            // `s = s + X` / `s += X`: fuse the whole
-                            // read-add-store into one dispatch, keeping the
-                            // builder box in the local slot between appends.
-                            if self.emit_append_assignment(s, op, value, name, keep)? {
-                                return Ok(());
+                            Resolved::Upvalue(i) => {
+                                if let Some(ar) = compound_arith(op) {
+                                    self.program.emit_op(Opcode::LoadUpvalue);
+                                    self.program.emit_u8(i);
+                                    self.emit_keep(|c| c.emit_expr(value))?;
+                                    self.program.emit_op(Opcode::ArithStoreUpvalue);
+                                    self.program.emit_u8(i);
+                                    self.program.emit_u8(ar);
+                                    self.program.emit_u8(keep as u8);
+                                } else {
+                                    self.emit_keep(|c| c.emit_expr(value))?;
+                                    if keep {
+                                        self.program.emit_op(Opcode::Dup);
+                                    }
+                                    self.program.emit_op(Opcode::StoreUpvalue);
+                                    self.program.emit_u8(i);
+                                }
                             }
-                            if let Some(ar) = compound_arith(op) {
-                                // x op= v: read x, evaluate v (JS order),
-                                // then fuse the arith + store into one opcode.
-                                self.program.emit_op(Opcode::LoadLocal);
-                                self.program.emit_u8(s);
-                                self.emit_keep(|c| c.emit_expr(value))?;
-                                self.program.emit_op(Opcode::ArithStoreLocal);
-                                self.program.emit_u8(s);
-                                self.program.emit_u8(ar);
-                                self.program.emit_u8(keep as u8);
-                            } else {
-                                self.emit_keep(|c| c.emit_expr(value))?;
+                            Resolved::Global(i) => {
+                                if is_native(name) {
+                                    return Err(CompileError::CannotShadowBuiltin(name.clone()));
+                                }
+                                if let Some(opc) = compound_opcode(op) {
+                                    self.program.emit_op(Opcode::LoadGlobal);
+                                    self.program.emit_u16(i);
+                                    self.emit_keep(|c| c.emit_expr(value))?;
+                                    self.program.emit_op(opc);
+                                } else {
+                                    self.emit_keep(|c| c.emit_expr(value))?;
+                                }
+                                // The arith (or the plain RHS) leaves the value on
+                                // the stack; keep=0 means StoreGlobal consumes it
+                                // directly.
                                 if keep {
                                     self.program.emit_op(Opcode::Dup);
                                 }
-                                self.program.emit_op(Opcode::StoreLocal);
-                                self.program.emit_u8(s);
-                            }
-                        }
-                        Resolved::Upvalue(i) => {
-                            if let Some(ar) = compound_arith(op) {
-                                self.program.emit_op(Opcode::LoadUpvalue);
-                                self.program.emit_u8(i);
-                                self.emit_keep(|c| c.emit_expr(value))?;
-                                self.program.emit_op(Opcode::ArithStoreUpvalue);
-                                self.program.emit_u8(i);
-                                self.program.emit_u8(ar);
-                                self.program.emit_u8(keep as u8);
-                            } else {
-                                self.emit_keep(|c| c.emit_expr(value))?;
-                                if keep {
-                                    self.program.emit_op(Opcode::Dup);
-                                }
-                                self.program.emit_op(Opcode::StoreUpvalue);
-                                self.program.emit_u8(i);
-                            }
-                        }
-                        Resolved::Global(i) => {
-                            if is_native(name) {
-                                return Err(CompileError::CannotShadowBuiltin(name.clone()));
-                            }
-                            if let Some(opc) = compound_opcode(op) {
-                                self.program.emit_op(Opcode::LoadGlobal);
+                                self.program.emit_op(Opcode::StoreGlobal);
                                 self.program.emit_u16(i);
-                                self.emit_keep(|c| c.emit_expr(value))?;
-                                self.program.emit_op(opc);
-                            } else {
-                                self.emit_keep(|c| c.emit_expr(value))?;
                             }
-                            // The arith (or the plain RHS) leaves the value on
-                            // the stack; keep=0 means StoreGlobal consumes it
-                            // directly.
-                            if keep {
-                                self.program.emit_op(Opcode::Dup);
-                            }
-                            self.program.emit_op(Opcode::StoreGlobal);
-                            self.program.emit_u16(i);
                         }
-                        }
-                    },
+                    }
                     Expr::Prop { obj, prop, .. } => {
                         let pi = self.program.add_constant(Value::string(prop.clone()));
                         if let Some(ar) = compound_arith(op) {
@@ -2123,7 +2223,12 @@ impl Compiler {
                                     }
                                     return Ok(());
                                 }
-                                if let Expr::Index { obj: vobj, index: vidx, .. } = value.as_ref() {
+                                if let Expr::Index {
+                                    obj: vobj,
+                                    index: vidx,
+                                    ..
+                                } = value.as_ref()
+                                {
                                     if let (Some(vos), Some(vis)) =
                                         (self.local_slot(vobj), self.local_slot(vidx))
                                     {
@@ -2144,11 +2249,17 @@ impl Compiler {
                             if let (Some(os), Some((is, ar, imm))) =
                                 (obj_s, self.local_plus_int(index))
                             {
-                                if let Expr::Index { obj: vobj, index: vidx, .. } = value.as_ref() {
+                                if let Expr::Index {
+                                    obj: vobj,
+                                    index: vidx,
+                                    ..
+                                } = value.as_ref()
+                                {
                                     if let (Some(vos), Some(vis)) =
                                         (self.local_slot(vobj), self.local_slot(vidx))
                                     {
-                                        self.program.emit_op(Opcode::SetIndexLocalPlusIntLocalGetLocal);
+                                        self.program
+                                            .emit_op(Opcode::SetIndexLocalPlusIntLocalGetLocal);
                                         self.program.emit_u8(os);
                                         self.program.emit_u8(is);
                                         self.program.emit_u8(ar);
@@ -2205,7 +2316,9 @@ impl Compiler {
                         }
                     }
                     _ => {
-                        return Err(CompileError::UnexpectedToken("invalid assignment target".to_string()));
+                        return Err(CompileError::UnexpectedToken(
+                            "invalid assignment target".to_string(),
+                        ));
                     }
                 }
             }
@@ -2218,9 +2331,17 @@ impl Compiler {
                 // feed the call), hence the emit_keep scoping.
                 let keep = self.keep_result;
                 let has_spread = args.iter().any(|a| a.spread);
-                let mask = args.iter().enumerate().fold(0u16, |m, (i, a)| {
-                    if a.spread { m | (1 << i) } else { m }
-                });
+                let mask =
+                    args.iter().enumerate().fold(
+                        0u16,
+                        |m, (i, a)| {
+                            if a.spread {
+                                m | (1 << i)
+                            } else {
+                                m
+                            }
+                        },
+                    );
                 // Method calls bind `this`: `o.m(...)` / `o[i](...)` â€” parens
                 // don't strip the reference (`(o.m)()` still binds). The
                 // receiver stays below the callee so the frame can read it as
@@ -2252,7 +2373,9 @@ impl Compiler {
                 if method {
                     // Stack: [receiver, callee]. Args push on top; CallMethod
                     // reads the receiver from one slot below the frame base.
-                    for a in args.iter() { self.emit_keep(|c| c.emit_expr(&a.expr))?; }
+                    for a in args.iter() {
+                        self.emit_keep(|c| c.emit_expr(&a.expr))?;
+                    }
                     if has_spread {
                         self.program.emit_op(if keep {
                             Opcode::CallMethodSpread
@@ -2273,7 +2396,9 @@ impl Compiler {
                 }
                 // Plain call: args first, then the callee (the top of stack
                 // is the function the Call opcode pops).
-                for a in args.iter() { self.emit_keep(|c| c.emit_expr(&a.expr))?; }
+                for a in args.iter() {
+                    self.emit_keep(|c| c.emit_expr(&a.expr))?;
+                }
                 self.emit_keep(|c| c.emit_expr(callee))?;
                 if has_spread {
                     if keep {
@@ -2301,7 +2426,9 @@ impl Compiler {
                 // Plain-call convention (args first, callee on top): New
                 // pops the callee, inserts the fresh instance below the args,
                 // and calls the constructor with `this` bound to it.
-                for a in args.iter() { self.emit_keep(|c| c.emit_expr(&a.expr))?; }
+                for a in args.iter() {
+                    self.emit_keep(|c| c.emit_expr(&a.expr))?;
+                }
                 self.emit_keep(|c| c.emit_expr(callee))?;
                 self.program.emit_op(Opcode::New);
                 self.program.emit_u8(args.len() as u8);
@@ -2316,10 +2443,20 @@ impl Compiler {
                 self.program.emit_u8(u);
                 let keep = self.keep_result;
                 let has_spread = args.iter().any(|a| a.spread);
-                let mask = args.iter().enumerate().fold(0u16, |m, (i, a)| {
-                    if a.spread { m | (1 << i) } else { m }
-                });
-                for a in args.iter() { self.emit_keep(|c| c.emit_expr(&a.expr))?; }
+                let mask =
+                    args.iter().enumerate().fold(
+                        0u16,
+                        |m, (i, a)| {
+                            if a.spread {
+                                m | (1 << i)
+                            } else {
+                                m
+                            }
+                        },
+                    );
+                for a in args.iter() {
+                    self.emit_keep(|c| c.emit_expr(&a.expr))?;
+                }
                 if has_spread {
                     self.program.emit_op(if keep {
                         Opcode::CallMethodSpread
@@ -2357,9 +2494,15 @@ impl Compiler {
                         let keep = self.keep_result;
                         let has_spread = args.iter().any(|a| a.spread);
                         let mask = args.iter().enumerate().fold(0u16, |m, (i, a)| {
-                            if a.spread { m | (1 << i) } else { m }
+                            if a.spread {
+                                m | (1 << i)
+                            } else {
+                                m
+                            }
                         });
-                        for a in args.iter() { self.emit_keep(|c| c.emit_expr(&a.expr))?; }
+                        for a in args.iter() {
+                            self.emit_keep(|c| c.emit_expr(&a.expr))?;
+                        }
                         if has_spread {
                             self.program.emit_op(if keep {
                                 Opcode::CallMethodSpread
@@ -2388,7 +2531,11 @@ impl Compiler {
                     }
                 }
             }
-            Expr::Class { name: _cname, extends, methods } => {
+            Expr::Class {
+                name: _cname,
+                extends,
+                methods,
+            } => {
                 // Construction sequence. Synthetic locals in the enclosing
                 // frame hold the parent class, the prototype object, and the
                 // class (constructor) value; methods capture the prototype (or
@@ -2416,7 +2563,12 @@ impl Compiler {
                 self.program.emit_op(Opcode::StoreLocal);
                 self.program.emit_u8(proto_slot);
                 // 3. Instance methods / accessors → proto.
-                for m in methods.iter().filter(|m| m.name != "constructor" && !m.is_static && m.kind != MethodKind::Field && !m.name.starts_with('#')) {
+                for m in methods.iter().filter(|m| {
+                    m.name != "constructor"
+                        && !m.is_static
+                        && m.kind != MethodKind::Field
+                        && !m.name.starts_with('#')
+                }) {
                     let home = if has_parent {
                         Some(UpvalueKind::Local { slot: proto_slot })
                     } else {
@@ -2495,7 +2647,10 @@ impl Compiler {
                         is_async: false,
                         is_generator: false,
                         kind: MethodKind::Normal,
-                        params: FnParams { params: Vec::new(), rest: None },
+                        params: FnParams {
+                            params: Vec::new(),
+                            rest: None,
+                        },
                         body: Box::new(Stmt::Block(Vec::new())),
                         init: None,
                     },
@@ -2536,7 +2691,9 @@ impl Compiler {
                 self.program.emit_op(Opcode::Dup);
                 self.program.emit_op(Opcode::LoadLocal);
                 self.program.emit_u8(proto_slot);
-                let pi = self.program.add_constant(Value::string("constructor".into()));
+                let pi = self
+                    .program
+                    .add_constant(Value::string("constructor".into()));
                 self.program.emit_op(Opcode::LoadConst);
                 self.program.emit_u16(pi);
                 self.program.emit_op(Opcode::SetProperty);
@@ -2627,11 +2784,17 @@ impl Compiler {
                 self.program.emit_op(Opcode::GetIndex);
             }
             Expr::Array(elems) => {
-                for e in elems { self.emit_expr(&e.expr)?; }
+                for e in elems {
+                    self.emit_expr(&e.expr)?;
+                }
                 let has_spread = elems.iter().any(|e| e.spread);
                 if has_spread {
                     let mask = elems.iter().enumerate().fold(0u16, |m, (i, e)| {
-                        if e.spread { m | (1 << i) } else { m }
+                        if e.spread {
+                            m | (1 << i)
+                        } else {
+                            m
+                        }
                     });
                     self.program.emit_op(Opcode::MakeArraySpread);
                     self.program.emit_u16(elems.len() as u16);
@@ -2659,7 +2822,9 @@ impl Compiler {
                 self.program.emit_u16(i);
             }
             Expr::Object(fields) => {
-                let has_accessors = fields.iter().any(|f| matches!(f, ObjElem::Getter(..) | ObjElem::Setter(..)));
+                let has_accessors = fields
+                    .iter()
+                    .any(|f| matches!(f, ObjElem::Getter(..) | ObjElem::Setter(..)));
                 if !has_accessors {
                     let mut mask = 0u16;
                     for (i, f) in fields.iter().enumerate() {
@@ -2685,7 +2850,10 @@ impl Compiler {
                     self.program.emit_u16(fields.len() as u16);
                     self.program.emit_u16(mask);
                 } else {
-                    let normal_fields: Vec<&ObjElem> = fields.iter().filter(|f| !matches!(f, ObjElem::Getter(..) | ObjElem::Setter(..))).collect();
+                    let normal_fields: Vec<&ObjElem> = fields
+                        .iter()
+                        .filter(|f| !matches!(f, ObjElem::Getter(..) | ObjElem::Setter(..)))
+                        .collect();
                     let mut mask = 0u16;
                     for (i, f) in normal_fields.iter().enumerate() {
                         match f {
@@ -2759,7 +2927,10 @@ impl Compiler {
                             let mut p = Parser::new(toks.clone());
                             let e = p.parse_expr(0)?;
                             if !matches!(p.peek(), Token::Eof) {
-                                return Err(CompileError::UnexpectedToken(format!("{:?}", p.peek())));
+                                return Err(CompileError::UnexpectedToken(format!(
+                                    "{:?}",
+                                    p.peek()
+                                )));
                             }
                             self.emit_expr(&e)?;
                         }
@@ -2767,13 +2938,20 @@ impl Compiler {
                     self.program.emit_op(Opcode::Add);
                 }
             }
-            Expr::Lambda { params, body, is_async, is_generator, is_arrow } => {
+            Expr::Lambda {
+                params,
+                body,
+                is_async,
+                is_generator,
+                is_arrow,
+            } => {
                 if params.params.iter().any(|p| p.default.is_some()) {
                     return Err(CompileError::UnexpectedToken("default parameters are not yet supported — use explicit `if (x===undefined) x=...` inside the body".to_string()));
                 }
                 let j = self.emit_jump(Opcode::Jump);
                 let start = self.program.bytecode.len();
-                self.program.record_function_name(start, "<anonymous>".to_string());
+                self.program
+                    .record_function_name(start, "<anonymous>".to_string());
                 // Arrows bind `this`/`arguments` lexically. When the body
                 // references them (directly or inside nested arrows), the
                 // arrow gets hidden `\0this`/`\0arguments` upvalues: a direct
@@ -2798,7 +2976,10 @@ impl Compiler {
                             // function's frame; it needs the args snapshot.
                             self.funcs.last_mut().unwrap().uses_arguments = true;
                         }
-                        upvalues.push(UpvalueRef { name: hidden.to_string(), kind });
+                        upvalues.push(UpvalueRef {
+                            name: hidden.to_string(),
+                            kind,
+                        });
                     }
                 }
                 self.funcs.push(FuncCtx {
@@ -2819,7 +3000,11 @@ impl Compiler {
                 if *is_async {
                     // Hidden slot (after the params) holds this invocation's
                     // promise; Return resolves it and hands it to the caller.
-                    self.funcs.last_mut().unwrap().locals.push("\u{0}promise".to_string());
+                    self.funcs
+                        .last_mut()
+                        .unwrap()
+                        .locals
+                        .push("\u{0}promise".to_string());
                     let ps = (self.funcs.last().unwrap().locals.len() - 1) as u8;
                     self.program.emit_op(Opcode::NewPromise);
                     self.program.emit_u8(ps);
@@ -2841,6 +3026,12 @@ impl Compiler {
                 self.program.emit_op(Opcode::LoadUndefined);
                 self.program.emit_op(Opcode::Return);
                 let ctx = self.funcs.pop().unwrap();
+                if ctx.locals.len() > 255 {
+                    return Err(CompileError::UnexpectedToken(format!(
+                        "function exceeds maximum limit of 255 local variables (got {})",
+                        ctx.locals.len()
+                    )));
+                }
                 self.patch_jump(j);
                 let ci = self.program.add_constant(Value::number(start as f64));
                 // Fixed params only â€” `names` includes the rest param, but
@@ -2861,11 +3052,16 @@ impl Compiler {
                 self.emit_expr(e)?;
                 self.program.emit_op(Opcode::Await);
             }
-            Expr::IncDec { target, is_inc, is_prefix } => {
+            Expr::IncDec {
+                target,
+                is_inc,
+                is_prefix,
+            } => {
                 // `a?.b++` is a SyntaxError in JS (not a valid reference).
                 if Self::is_optional_chain(target) {
                     return Err(CompileError::UnexpectedToken(
-                        "invalid update target: optional chaining cannot be incremented".to_string(),
+                        "invalid update target: optional chaining cannot be incremented"
+                            .to_string(),
                     ));
                 }
                 let emit_one = |c: &mut Compiler| {
@@ -2883,7 +3079,9 @@ impl Compiler {
                 // `x++` evaluates to the old value; `++x` to the new one.
                 // `(a)++` is valid: unwrap grouping parens first.
                 let mut target_ref = target.as_ref();
-                while let Expr::Paren(inner) = target_ref { target_ref = inner.as_ref(); }
+                while let Expr::Paren(inner) = target_ref {
+                    target_ref = inner.as_ref();
+                }
                 match target_ref {
                     Expr::Ident(name) => {
                         // `++imported` is also an assignment â€” same loud error.
@@ -2891,78 +3089,79 @@ impl Compiler {
                             return Err(CompileError::AssignToImport(name.clone()));
                         }
                         match self.resolve(name) {
-                        Resolved::Local(s) => {
-                            // x++ / ++x / x-- / --x on a plain local: one fused
-                            // opcode reads, mutates, stores, and pushes (if
-                            // keep).
-                            let delta = if *is_inc { 1i8 } else { -1i8 };
-                            let flags = (*is_prefix as u8) | ((keep as u8) << 1);
-                            self.program.emit_op(Opcode::IncLocal);
-                            self.program.emit_u8(s);
-                            self.program.emit_u8(flags);
-                            self.program.emit_u8(delta as u8);
-                        }
-                        Resolved::Upvalue(u) => {
-                            // keep=0: the result is discarded, so both forms
-                            // collapse to load / Â±1 / store (the Add pushes the
-                            // new value, StoreUpvalue consumes it).
-                            if !keep {
-                                self.program.emit_op(Opcode::LoadUpvalue);
-                                self.program.emit_u8(u);
-                                emit_one(self);
-                                self.program.emit_op(Opcode::StoreUpvalue);
-                                self.program.emit_u8(u);
-                            } else if *is_prefix {
-                                self.program.emit_op(Opcode::LoadUpvalue);
-                                self.program.emit_u8(u);
-                                emit_one(self);
-                                self.program.emit_op(Opcode::Dup);
-                                self.program.emit_op(Opcode::StoreUpvalue);
-                                self.program.emit_u8(u);
-                            } else {
-                                self.program.emit_op(Opcode::LoadUpvalue);
-                                self.program.emit_u8(u);
-                                self.program.emit_op(Opcode::Dup);
-                                emit_one(self);
-                                self.program.emit_op(Opcode::StoreUpvalue);
-                                self.program.emit_u8(u);
+                            Resolved::Local(s) => {
+                                // x++ / ++x / x-- / --x on a plain local: one fused
+                                // opcode reads, mutates, stores, and pushes (if
+                                // keep).
+                                let delta = if *is_inc { 1i8 } else { -1i8 };
+                                let flags = (*is_prefix as u8) | ((keep as u8) << 1);
+                                self.program.emit_op(Opcode::IncLocal);
+                                self.program.emit_u8(s);
+                                self.program.emit_u8(flags);
+                                self.program.emit_u8(delta as u8);
+                            }
+                            Resolved::Upvalue(u) => {
+                                // keep=0: the result is discarded, so both forms
+                                // collapse to load / Â±1 / store (the Add pushes the
+                                // new value, StoreUpvalue consumes it).
+                                if !keep {
+                                    self.program.emit_op(Opcode::LoadUpvalue);
+                                    self.program.emit_u8(u);
+                                    emit_one(self);
+                                    self.program.emit_op(Opcode::StoreUpvalue);
+                                    self.program.emit_u8(u);
+                                } else if *is_prefix {
+                                    self.program.emit_op(Opcode::LoadUpvalue);
+                                    self.program.emit_u8(u);
+                                    emit_one(self);
+                                    self.program.emit_op(Opcode::Dup);
+                                    self.program.emit_op(Opcode::StoreUpvalue);
+                                    self.program.emit_u8(u);
+                                } else {
+                                    self.program.emit_op(Opcode::LoadUpvalue);
+                                    self.program.emit_u8(u);
+                                    self.program.emit_op(Opcode::Dup);
+                                    emit_one(self);
+                                    self.program.emit_op(Opcode::StoreUpvalue);
+                                    self.program.emit_u8(u);
+                                }
+                            }
+                            Resolved::Global(g) => {
+                                if is_native(name) {
+                                    return Err(CompileError::CannotShadowBuiltin(name.clone()));
+                                }
+                                if !keep {
+                                    self.program.emit_op(Opcode::LoadGlobal);
+                                    self.program.emit_u16(g);
+                                    emit_one(self);
+                                    self.program.emit_op(Opcode::StoreGlobal);
+                                    self.program.emit_u16(g);
+                                } else if *is_prefix {
+                                    self.program.emit_op(Opcode::LoadGlobal);
+                                    self.program.emit_u16(g);
+                                    emit_one(self);
+                                    self.program.emit_op(Opcode::Dup);
+                                    self.program.emit_op(Opcode::StoreGlobal);
+                                    self.program.emit_u16(g);
+                                } else {
+                                    self.program.emit_op(Opcode::LoadGlobal);
+                                    self.program.emit_u16(g);
+                                    self.program.emit_op(Opcode::Dup);
+                                    emit_one(self);
+                                    self.program.emit_op(Opcode::StoreGlobal);
+                                    self.program.emit_u16(g);
+                                }
                             }
                         }
-                        Resolved::Global(g) => {
-                            if is_native(name) {
-                                return Err(CompileError::CannotShadowBuiltin(name.clone()));
-                            }
-                            if !keep {
-                                self.program.emit_op(Opcode::LoadGlobal);
-                                self.program.emit_u16(g);
-                                emit_one(self);
-                                self.program.emit_op(Opcode::StoreGlobal);
-                                self.program.emit_u16(g);
-                            } else if *is_prefix {
-                                self.program.emit_op(Opcode::LoadGlobal);
-                                self.program.emit_u16(g);
-                                emit_one(self);
-                                self.program.emit_op(Opcode::Dup);
-                                self.program.emit_op(Opcode::StoreGlobal);
-                                self.program.emit_u16(g);
-                            } else {
-                                self.program.emit_op(Opcode::LoadGlobal);
-                                self.program.emit_u16(g);
-                                self.program.emit_op(Opcode::Dup);
-                                emit_one(self);
-                                self.program.emit_op(Opcode::StoreGlobal);
-                                self.program.emit_u16(g);
-                            }
-                        }
-                        }
-                    },
+                    }
                     Expr::Prop { obj, prop, .. } => {
                         // o.a++ / ++o.a / o.a-- / --o.a: one fused opcode reads
                         // obj.p, adds Â±1, writes it back, and pushes the old
                         // (postfix) or new (prefix) value (if keep). The obj
                         // stays on the stack and evaluates exactly once.
                         let pi = self.program.add_constant(Value::string(prop.clone()));
-                        let flags = (*is_prefix as u8) | ((!*is_inc as u8) << 1) | ((keep as u8) << 2);
+                        let flags =
+                            (*is_prefix as u8) | ((!*is_inc as u8) << 1) | ((keep as u8) << 2);
                         self.emit_keep(|c| c.emit_expr(obj))?;
                         self.program.emit_op(Opcode::IncPropConst);
                         self.program.emit_u8(flags);
@@ -2973,7 +3172,8 @@ impl Compiler {
                         // reads obj[idx], adds Â±1, writes back, and pushes the
                         // old (postfix) or new (prefix) value (if keep). The
                         // obj and index stay on the stack, each evaluating once.
-                        let flags = (*is_prefix as u8) | ((!*is_inc as u8) << 1) | ((keep as u8) << 2);
+                        let flags =
+                            (*is_prefix as u8) | ((!*is_inc as u8) << 1) | ((keep as u8) << 2);
                         self.emit_keep(|c| c.emit_expr(obj))?;
                         self.emit_keep(|c| c.emit_expr(index))?;
                         self.program.emit_op(Opcode::IncIndexConst);
@@ -2997,8 +3197,12 @@ impl Compiler {
                 let then_pos = self.program.bytecode.len();
                 self.emit_expr(then)?;
                 let end = self.emit_jump(Opcode::Jump);
-                for j in exit_jumps { self.patch_jump(j); }
-                for j in body_jumps { self.patch_jump_to(j, then_pos); }
+                for j in exit_jumps {
+                    self.patch_jump(j);
+                }
+                for j in body_jumps {
+                    self.patch_jump_to(j, then_pos);
+                }
                 self.emit_expr(els)?;
                 self.patch_jump(end);
             }
@@ -3023,7 +3227,9 @@ impl Compiler {
                     // len = arr.length
                     self.program.emit_op(Opcode::LoadLocal);
                     self.program.emit_u8(arr_slot);
-                    let lc = self.program.add_constant(Value::string("length".to_string()));
+                    let lc = self
+                        .program
+                        .add_constant(Value::string("length".to_string()));
                     self.program.emit_op(Opcode::GetProperty);
                     self.program.emit_u16(lc);
                     self.program.emit_op(Opcode::StoreLocal);
@@ -3103,7 +3309,13 @@ impl Compiler {
                     }
                 }
             }
-            Stmt::FnDecl { name, params, body, is_async, is_generator } => {
+            Stmt::FnDecl {
+                name,
+                params,
+                body,
+                is_async,
+                is_generator,
+            } => {
                 if is_native(name) {
                     return Err(CompileError::CannotShadowBuiltin(name.clone()));
                 }
@@ -3134,7 +3346,11 @@ impl Compiler {
                 self.program.emit_u8(name_slot);
                 if *is_async {
                     // Promise slot after params and the self slot.
-                    self.funcs.last_mut().unwrap().locals.push("\u{0}promise".to_string());
+                    self.funcs
+                        .last_mut()
+                        .unwrap()
+                        .locals
+                        .push("\u{0}promise".to_string());
                     let ps = (self.funcs.last().unwrap().locals.len() - 1) as u8;
                     self.program.emit_op(Opcode::NewPromise);
                     self.program.emit_u8(ps);
@@ -3156,6 +3372,12 @@ impl Compiler {
                 self.program.emit_op(Opcode::LoadUndefined);
                 self.program.emit_op(Opcode::Return);
                 let ctx = self.funcs.pop().unwrap();
+                if ctx.locals.len() > 255 {
+                    return Err(CompileError::UnexpectedToken(format!(
+                        "function exceeds maximum limit of 255 local variables (got {})",
+                        ctx.locals.len()
+                    )));
+                }
                 self.patch_jump(j);
                 let ci = self.program.add_constant(Value::number(start as f64));
                 // Fixed params only â€” `names` includes the rest param, but
@@ -3175,7 +3397,14 @@ impl Compiler {
                 } else {
                     // Reuse a hoisted (pre-allocated) slot if present; else
                     // allocate a fresh one.
-                    let s = match self.funcs.last().unwrap().locals.iter().rposition(|l| l == name) {
+                    let s = match self
+                        .funcs
+                        .last()
+                        .unwrap()
+                        .locals
+                        .iter()
+                        .rposition(|l| l == name)
+                    {
                         Some(s) => s as u8,
                         None => {
                             self.funcs.last_mut().unwrap().locals.push(name.to_string());
@@ -3186,7 +3415,11 @@ impl Compiler {
                     self.program.emit_u8(s);
                 }
             }
-            Stmt::Class { name, extends, methods } => {
+            Stmt::Class {
+                name,
+                extends,
+                methods,
+            } => {
                 // `class C extends B { â€¦ }` â€” build the class value in place
                 // (not hoisted, matching JS TDZ semantics), then bind it to
                 // the name.
@@ -3201,7 +3434,14 @@ impl Compiler {
                     self.program.emit_op(Opcode::StoreGlobal);
                     self.program.emit_u16(i);
                 } else {
-                    let s = match self.funcs.last().unwrap().locals.iter().rposition(|l| l == name) {
+                    let s = match self
+                        .funcs
+                        .last()
+                        .unwrap()
+                        .locals
+                        .iter()
+                        .rposition(|l| l == name)
+                    {
                         Some(s) => s as u8,
                         None => {
                             self.funcs.last_mut().unwrap().locals.push(name.to_string());
@@ -3213,8 +3453,11 @@ impl Compiler {
                 }
             }
             Stmt::Return(e) => {
-                if let Some(v) = e { self.emit_expr(v)?; }
-                else { self.program.emit_op(Opcode::LoadUndefined); }
+                if let Some(v) = e {
+                    self.emit_expr(v)?;
+                } else {
+                    self.program.emit_op(Opcode::LoadUndefined);
+                }
                 if !self.trys.is_empty() {
                     // The finally bodies' locals materialize at their slots,
                     // which could sit where the return value is on the operand
@@ -3222,7 +3465,10 @@ impl Compiler {
                     // cleanup's locals first, and restore it afterwards.
                     let stash = {
                         let s = self.funcs.last_mut().unwrap().locals.len() as u8;
-                        self.funcs.last_mut().unwrap().locals
+                        self.funcs
+                            .last_mut()
+                            .unwrap()
+                            .locals
                             .push("\u{0}retstash".to_string());
                         s
                     };
@@ -3254,14 +3500,22 @@ impl Compiler {
                 self.emit_stmt(then)?;
                 if let Some(e) = els {
                     let end = self.emit_jump(Opcode::Jump);
-                    for j in exit_jumps { self.patch_jump(j); }
-                    for j in body_jumps { self.patch_jump_to(j, then_pos); }
+                    for j in exit_jumps {
+                        self.patch_jump(j);
+                    }
+                    for j in body_jumps {
+                        self.patch_jump_to(j, then_pos);
+                    }
                     self.emit_stmt(e)?;
                     self.patch_jump(end);
                 } else {
                     let end = self.emit_jump(Opcode::Jump);
-                    for j in exit_jumps { self.patch_jump(j); }
-                    for j in body_jumps { self.patch_jump_to(j, then_pos); }
+                    for j in exit_jumps {
+                        self.patch_jump(j);
+                    }
+                    for j in body_jumps {
+                        self.patch_jump_to(j, then_pos);
+                    }
                     self.patch_jump(end);
                 }
             }
@@ -3286,8 +3540,12 @@ impl Compiler {
                 let mut lc = self.loops.pop().unwrap();
                 self.program.emit_op(Opcode::Jump);
                 self.program.emit_u32(ls as u32);
-                for j in exit_jumps { self.patch_jump(j); }
-                for j in body_jumps { self.patch_jump_to(j, body_pos); }
+                for j in exit_jumps {
+                    self.patch_jump(j);
+                }
+                for j in body_jumps {
+                    self.patch_jump_to(j, body_pos);
+                }
                 self.finish_loop(&mut lc, ls);
             }
             Stmt::DoWhile { cond, body } => {
@@ -3312,12 +3570,23 @@ impl Compiler {
                 self.program.emit_op(Opcode::Jump);
                 self.program.emit_u32(ls as u32);
                 let mut lc = self.loops.pop().unwrap();
-                for j in exit_jumps { self.patch_jump(j); }
-                for j in body_jumps { self.patch_jump_to(j, ls); }
+                for j in exit_jumps {
+                    self.patch_jump(j);
+                }
+                for j in body_jumps {
+                    self.patch_jump_to(j, ls);
+                }
                 self.finish_loop(&mut lc, cond_pos);
             }
-            Stmt::For { init, cond, update, body } => {
-                if let Some(i) = init { self.emit_stmt(i)?; }
+            Stmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                if let Some(i) = init {
+                    self.emit_stmt(i)?;
+                }
                 let ls = self.program.bytecode.len();
                 if let Some(c) = cond {
                     let mut exit_jumps = Vec::new();
@@ -3335,11 +3604,17 @@ impl Compiler {
                     self.emit_stmt(body)?;
                     let mut lc = self.loops.pop().unwrap();
                     let update_pos = self.program.bytecode.len();
-                    if let Some(u) = update { self.emit_stmt_expr(u)?; }
+                    if let Some(u) = update {
+                        self.emit_stmt_expr(u)?;
+                    }
                     self.program.emit_op(Opcode::Jump);
                     self.program.emit_u32(ls as u32);
-                    for j in exit_jumps { self.patch_jump(j); }
-                    for j in body_jumps { self.patch_jump_to(j, body_pos); }
+                    for j in exit_jumps {
+                        self.patch_jump(j);
+                    }
+                    for j in body_jumps {
+                        self.patch_jump_to(j, body_pos);
+                    }
                     self.finish_loop(&mut lc, update_pos);
                 } else {
                     self.loops.push(LoopCtx {
@@ -3353,16 +3628,28 @@ impl Compiler {
                     self.emit_stmt(body)?;
                     let mut lc = self.loops.pop().unwrap();
                     let update_pos = self.program.bytecode.len();
-                    if let Some(u) = update { self.emit_stmt_expr(u)?; }
+                    if let Some(u) = update {
+                        self.emit_stmt_expr(u)?;
+                    }
                     self.program.emit_op(Opcode::Jump);
                     self.program.emit_u32(ls as u32);
                     self.finish_loop(&mut lc, update_pos);
                 }
             }
-            Stmt::ForOf { pat, declared, iterable, body } => {
+            Stmt::ForOf {
+                pat,
+                declared,
+                iterable,
+                body,
+            } => {
                 self.emit_for_iter(pat, *declared, iterable, body, false)?;
             }
-            Stmt::ForIn { pat, declared, obj, body } => {
+            Stmt::ForIn {
+                pat,
+                declared,
+                obj,
+                body,
+            } => {
                 self.emit_for_iter(pat, *declared, obj, body, true)?;
             }
             Stmt::Block(stmts) => {
@@ -3386,7 +3673,9 @@ impl Compiler {
                 // Local slots are intentionally not reclaimed here: truncating
                 // would let a later variable reuse a slot that still holds a
                 // captured cell, corrupting closure state.
-                for st in stmts { self.emit_stmt(st)?; }
+                for st in stmts {
+                    self.emit_stmt(st)?;
+                }
             }
             Stmt::Break => self.emit_loop_exit(true, None)?,
             Stmt::Continue => self.emit_loop_exit(false, None)?,
@@ -3399,10 +3688,7 @@ impl Compiler {
                 }
                 let is_loop = matches!(
                     b,
-                    Stmt::While { .. }
-                        | Stmt::For { .. }
-                        | Stmt::ForOf { .. }
-                        | Stmt::ForIn { .. }
+                    Stmt::While { .. } | Stmt::For { .. } | Stmt::ForOf { .. } | Stmt::ForIn { .. }
                 );
                 self.labels.push(LabelCtx {
                     name: name.clone(),
@@ -3425,8 +3711,14 @@ impl Compiler {
                 self.emit_expr(e)?;
                 self.program.emit_op(Opcode::Throw);
             }
-            Stmt::Try { body, catch, finally } => {
-                self.trys.push(TryCtx { finally: finally.clone() });
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+            } => {
+                self.trys.push(TryCtx {
+                    finally: finally.clone(),
+                });
                 let handler_off = self.emit_jump(Opcode::TryStart);
                 self.emit_stmt(body)?;
                 // Drop this try's context (an exit via break/continue/return
@@ -3446,7 +3738,12 @@ impl Compiler {
                 self.patch_jump_to(handler_off, self.program.bytecode.len());
                 let push_slot = |compiler: &mut Compiler, name: &str| -> u8 {
                     let s = compiler.funcs.last_mut().unwrap().locals.len() as u8;
-                    compiler.funcs.last_mut().unwrap().locals.push(name.to_string());
+                    compiler
+                        .funcs
+                        .last_mut()
+                        .unwrap()
+                        .locals
+                        .push(name.to_string());
                     s
                 };
                 match (catch.as_ref(), finally.as_ref()) {
@@ -3462,7 +3759,9 @@ impl Compiler {
                         // handler, so its own throws (and returns/breaks via
                         // the inline emission) still trigger the finally.
                         let fb = self.emit_jump(Opcode::TryStart);
-                        self.trys.push(TryCtx { finally: finally.clone() });
+                        self.trys.push(TryCtx {
+                            finally: finally.clone(),
+                        });
                         self.emit_stmt(c)?;
                         self.trys.pop();
                         self.program.emit_op(Opcode::TryEnd);
@@ -3565,7 +3864,9 @@ impl Compiler {
             }
             Stmt::Import { src, kind } => match kind {
                 ImportKind::Core(names) => {
-                    for n in names { self.resolve_global(n); }
+                    for n in names {
+                        self.resolve_global(n);
+                    }
                 }
                 ImportKind::Python(bind) => {
                     // `import { f } from './x.py' as python`: bind the alias
@@ -3618,7 +3919,9 @@ impl Compiler {
                     self.imported_bindings.insert(bind.clone());
                     let idx = self.resolve_global(bind);
                     self.emit_require_call(src)?;
-                    let ci = self.program.add_constant(Value::string("default".to_string()));
+                    let ci = self
+                        .program
+                        .add_constant(Value::string("default".to_string()));
                     self.program.emit_op(Opcode::GetProperty);
                     self.program.emit_u16(ci);
                     self.program.emit_op(Opcode::StoreGlobal);
@@ -3629,7 +3932,11 @@ impl Compiler {
                     self.program.emit_op(Opcode::Pop);
                 }
             },
-            Stmt::Export { pairs, stmt, default } => {
+            Stmt::Export {
+                pairs,
+                stmt,
+                default,
+            } => {
                 if !self.in_module {
                     // Node also rejects `export` outside an ES module.
                     return Err(CompileError::UnexpectedToken(
@@ -3707,7 +4014,9 @@ impl Compiler {
         // len = arr.length (GetProperty reads its prop from the operand)
         self.program.emit_op(Opcode::LoadLocal);
         self.program.emit_u8(arr_slot);
-        let lc = self.program.add_constant(Value::string("length".to_string()));
+        let lc = self
+            .program
+            .add_constant(Value::string("length".to_string()));
         self.program.emit_op(Opcode::GetProperty);
         self.program.emit_u16(lc);
         self.program.emit_op(Opcode::StoreLocal);
@@ -3732,7 +4041,11 @@ impl Compiler {
         let tmp = self.fresh_local();
         self.program.emit_op(Opcode::StoreLocal);
         self.program.emit_u8(tmp);
-        let mode = if declared { PatStoreMode::Declare } else { PatStoreMode::Assign };
+        let mode = if declared {
+            PatStoreMode::Declare
+        } else {
+            PatStoreMode::Assign
+        };
         self.emit_pattern_store(pat, tmp, mode)?;
 
         self.loops.push(LoopCtx {
@@ -3796,7 +4109,10 @@ impl Compiler {
         let trys_depth;
         let target: ExitTarget;
         if let Some(l) = label {
-            let idx = self.labels.iter().rposition(|lc| lc.name == l)
+            let idx = self
+                .labels
+                .iter()
+                .rposition(|lc| lc.name == l)
                 .ok_or_else(|| CompileError::UndefinedLabel(l.to_string()))?;
             if !is_break && !self.labels[idx].is_loop {
                 return Err(CompileError::ContinueNonLoop(l.to_string()));
@@ -3911,15 +4227,19 @@ impl Compiler {
                 }
                 if let Stmt::Export { pairs, .. } = st {
                     for (_, binding) in pairs {
-                        if binding != DEFAULT_EXPORT
-                            && !c.program.globals.contains(binding)
-                        {
-                            return Err(CompileError::UndefinedVariable(
-                                binding.clone(),
-                            ));
+                        if binding != DEFAULT_EXPORT && !c.program.globals.contains(binding) {
+                            return Err(CompileError::UndefinedVariable(binding.clone()));
                         }
                     }
                 }
+            }
+        }
+        if let Some(top) = c.funcs.first() {
+            if top.locals.len() > 255 {
+                return Err(CompileError::UnexpectedToken(format!(
+                    "script exceeds maximum limit of 255 local variables (got {})",
+                    top.locals.len()
+                )));
             }
         }
         c.program.emit_op(Opcode::Halt);
@@ -4037,7 +4357,13 @@ impl Compiler {
                             i += 1;
                         }
                         ')' | ']' | '}' => {
-                            let want = if c == ')' { '(' } else if c == ']' { '[' } else { '{' };
+                            let want = if c == ')' {
+                                '('
+                            } else if c == ']' {
+                                '['
+                            } else {
+                                '{'
+                            };
                             if delims.last() == Some(&want) {
                                 delims.pop();
                             } else {
@@ -4076,4 +4402,3 @@ impl Compiler {
         delims.is_empty() && matches!(mode, Mode::Code | Mode::LineComment)
     }
 }
-

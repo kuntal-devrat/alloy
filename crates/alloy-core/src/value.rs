@@ -55,34 +55,48 @@ pub const SYMBOL_IS_CONCAT_SPREADABLE: u64 = 5;
 pub const SYMBOL_SPECIES: u64 = 6;
 pub const SYMBOL_ASYNC_ITERATOR: u64 = 7;
 
-static SYMBOL_DESCS: std::sync::OnceLock<std::sync::Mutex<hashbrown::HashMap<u64, String>>> = std::sync::OnceLock::new();
-static SYMBOL_FOR_REGISTRY: std::sync::OnceLock<std::sync::Mutex<hashbrown::HashMap<String, u64>>> = std::sync::OnceLock::new();
+static SYMBOL_DESCS: std::sync::OnceLock<std::sync::Mutex<hashbrown::HashMap<u64, String>>> =
+    std::sync::OnceLock::new();
+static SYMBOL_FOR_REGISTRY: std::sync::OnceLock<std::sync::Mutex<hashbrown::HashMap<String, u64>>> =
+    std::sync::OnceLock::new();
 static NEXT_SYMBOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100);
 
 pub fn symbol_new(desc: Option<&str>) -> Value {
     let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(d) = desc {
-        let mut map = SYMBOL_DESCS.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+        let mut map = SYMBOL_DESCS
+            .get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new()))
+            .lock()
+            .unwrap();
         map.insert(id, d.to_string());
     }
     Value::symbol(id)
 }
 
 pub fn symbol_for(key: &str) -> Value {
-    let mut reg = SYMBOL_FOR_REGISTRY.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+    let mut reg = SYMBOL_FOR_REGISTRY
+        .get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new()))
+        .lock()
+        .unwrap();
     if let Some(&id) = reg.get(key) {
         return Value::symbol(id);
     }
     let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     reg.insert(key.to_string(), id);
-    let mut descs = SYMBOL_DESCS.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+    let mut descs = SYMBOL_DESCS
+        .get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new()))
+        .lock()
+        .unwrap();
     descs.insert(id, key.to_string());
     Value::symbol(id)
 }
 
 pub fn symbol_key_for(sym: &Value) -> Option<String> {
     let id = sym.as_symbol()?;
-    let reg = SYMBOL_FOR_REGISTRY.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+    let reg = SYMBOL_FOR_REGISTRY
+        .get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new()))
+        .lock()
+        .unwrap();
     for (k, &v) in reg.iter() {
         if v == id {
             return Some(k.clone());
@@ -101,7 +115,10 @@ pub fn symbol_description(id: u64) -> Option<String> {
         SYMBOL_SPECIES => Some("Symbol.species".to_string()),
         SYMBOL_ASYNC_ITERATOR => Some("Symbol.asyncIterator".to_string()),
         _ => {
-            let map = SYMBOL_DESCS.get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new())).lock().unwrap();
+            let map = SYMBOL_DESCS
+                .get_or_init(|| std::sync::Mutex::new(hashbrown::HashMap::new()))
+                .lock()
+                .unwrap();
             map.get(&id).cloned()
         }
     }
@@ -247,7 +264,9 @@ impl AString {
     #[inline]
     pub fn set_builder_bytes(&mut self, p: *mut u8) {
         debug_assert!(self.is_builder());
-        unsafe { *((self as *mut AString as *mut u8).add(16) as *mut usize) = p as usize; }
+        unsafe {
+            *((self as *mut AString as *mut u8).add(16) as *mut usize) = p as usize;
+        }
     }
 
     /// The contiguous byte payload for flat and builder forms (cons boxes
@@ -497,7 +516,10 @@ enum MiscBox {
         props: RefCell<Option<Rc<RefCell<hashbrown::HashMap<String, Value>>>>>,
     },
     Pointer(*mut u8),
-    Buffer { ptr: *mut u8, len: usize },
+    Buffer {
+        ptr: *mut u8,
+        len: usize,
+    },
     Channel(Arc<Mutex<ChannelState>>),
     /// A regular expression. The compiled program is shared through
     /// `RegexState.compiled` (the VM caches it per pattern+flags); each
@@ -699,7 +721,7 @@ impl ArrayData {
                     // For large packed arrays, memmove via Vec::drain is faster than remove(0) loop
                     let v = vs[0];
                     vs.rotate_left(1);
-                    vs.truncate(vs.len()-1);
+                    vs.truncate(vs.len() - 1);
                     Value::int(v)
                 } else {
                     Value::int(vs.remove(0))
@@ -711,7 +733,7 @@ impl ArrayData {
                 } else if vs.len() > 64 {
                     let v = vs[0].clone();
                     vs.rotate_left(1);
-                    vs.truncate(vs.len()-1);
+                    vs.truncate(vs.len() - 1);
                     v
                 } else {
                     vs.remove(0)
@@ -792,9 +814,7 @@ impl Clone for Value {
     #[inline(always)]
     fn clone(&self) -> Self {
         match self.0 & TAG_MASK {
-            TAG_CELL => unsafe {
-                Rc::increment_strong_count(heap_ptr::<RefCell<Value>>(self.0))
-            },
+            TAG_CELL => unsafe { Rc::increment_strong_count(heap_ptr::<RefCell<Value>>(self.0)) },
             TAG_FN => unsafe { Rc::increment_strong_count(heap_ptr::<FunctionData>(self.0)) },
             TAG_MISC => unsafe { Rc::increment_strong_count(heap_ptr::<MiscBox>(self.0)) },
             _ => {}
@@ -875,15 +895,24 @@ pub struct Shape {
 thread_local! {
     static TRANSITIONS: std::cell::RefCell<hashbrown::HashMap<(u64, crate::intern::Atom, u32), Rc<Shape>>> = std::cell::RefCell::new(hashbrown::HashMap::new());
 }
-fn shape_transition_lookup(parent: u64, atom: crate::intern::Atom, offset: u32) -> Option<Rc<Shape>> {
-    TRANSITIONS.try_with(|t| t.borrow().get(&(parent, atom, offset)).cloned()).ok().flatten()
+fn shape_transition_lookup(
+    parent: u64,
+    atom: crate::intern::Atom,
+    offset: u32,
+) -> Option<Rc<Shape>> {
+    TRANSITIONS
+        .try_with(|t| t.borrow().get(&(parent, atom, offset)).cloned())
+        .ok()
+        .flatten()
 }
 fn shape_transition_insert(parent: u64, atom: crate::intern::Atom, offset: u32, shape: Rc<Shape>) {
     let _ = TRANSITIONS.try_with(|t| {
         let mut g = t.borrow_mut();
         if g.len() >= 1024 {
             let drop_keys: Vec<_> = g.keys().take(256).cloned().collect();
-            for k in drop_keys { g.remove(&k); }
+            for k in drop_keys {
+                g.remove(&k);
+            }
         }
         g.insert((parent, atom, offset), shape);
     });
@@ -932,7 +961,11 @@ impl Shape {
     /// insertion order), for JSON.stringify — JSON emits keys in the order
     /// they were added, unlike GetKeys.
     pub fn keys_by_offset(&self) -> Vec<(&String, u32)> {
-        self.names.iter().enumerate().map(|(idx, s)| (s, idx as u32)).collect()
+        self.names
+            .iter()
+            .enumerate()
+            .map(|(idx, s)| (s, idx as u32))
+            .collect()
     }
 }
 
@@ -1076,8 +1109,16 @@ impl ObjectData {
         self.shape
             .keys_sorted()
             .into_iter()
-            .filter(|k| !k.starts_with('\0') && !self.deleted[self.shape.get(k.as_str()).unwrap_or(0) as usize])
-            .map(|k| (k.as_str(), &self.values[self.shape.get(k.as_str()).unwrap_or(0) as usize]))
+            .filter(|k| {
+                !k.starts_with('\0')
+                    && !self.deleted[self.shape.get(k.as_str()).unwrap_or(0) as usize]
+            })
+            .map(|k| {
+                (
+                    k.as_str(),
+                    &self.values[self.shape.get(k.as_str()).unwrap_or(0) as usize],
+                )
+            })
             .collect()
     }
 
@@ -1087,7 +1128,10 @@ impl ObjectData {
         self.shape
             .keys_sorted()
             .into_iter()
-            .filter(|k| !k.starts_with('\0') && !self.deleted[self.shape.get(k.as_str()).unwrap_or(0) as usize])
+            .filter(|k| {
+                !k.starts_with('\0')
+                    && !self.deleted[self.shape.get(k.as_str()).unwrap_or(0) as usize]
+            })
             .collect()
     }
 }
@@ -1153,7 +1197,10 @@ impl WakeHandle {
 
 impl Clone for WakeHandle {
     fn clone(&self) -> Self {
-        Self { wake: self.wake.clone(), inbox: self.inbox.clone() }
+        Self {
+            wake: self.wake.clone(),
+            inbox: self.inbox.clone(),
+        }
     }
 }
 
@@ -1162,7 +1209,9 @@ impl Clone for WakeHandle {
 // the handle in traces.
 impl fmt::Debug for WakeHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WakeHandle").field("wake", &self.wake).finish()
+        f.debug_struct("WakeHandle")
+            .field("wake", &self.wake)
+            .finish()
     }
 }
 
@@ -1179,7 +1228,11 @@ pub struct PromiseState {
 
 impl PromiseState {
     pub fn pending() -> Self {
-        Self { status: PromiseStatus::Pending, continuations: Vec::new(), owner: None }
+        Self {
+            status: PromiseStatus::Pending,
+            continuations: Vec::new(),
+            owner: None,
+        }
     }
 }
 
@@ -1320,7 +1373,10 @@ pub trait VmHost {
     fn finalize_python_embed(&mut self) -> Value {
         let mut m = hashbrown::HashMap::new();
         m.insert("finalized".to_string(), Value::bool(false));
-        m.insert("error".to_string(), Value::string("embed mode is not active".to_string()));
+        m.insert(
+            "error".to_string(),
+            Value::string("embed mode is not active".to_string()),
+        );
         m.insert("liveBackends".to_string(), Value::number(0.0));
         Value::object(m)
     }
@@ -1522,7 +1578,10 @@ impl Value {
     /// length, so repeated `.length` on a growing rope is O(1) too.
     #[inline]
     pub fn rope(a: Value, b: Value) -> Value {
-        debug_assert!(a.is_string() && b.is_string(), "rope operands must be strings");
+        debug_assert!(
+            a.is_string() && b.is_string(),
+            "rope operands must be strings"
+        );
         let heap = heap::current_heap();
         let box_ptr = unsafe { (*heap).alloc_raw_region(32, KIND_STRING) as *mut AString };
         unsafe {
@@ -1565,7 +1624,8 @@ impl Value {
     #[inline]
     pub fn array_ints(v: Vec<i64>) -> Value {
         let heap = heap::current_heap();
-        let box_ptr = unsafe { (*heap).alloc_box_kind(KIND_ARRAY, RefCell::new(ArrayData::Ints(v))) };
+        let box_ptr =
+            unsafe { (*heap).alloc_box_kind(KIND_ARRAY, RefCell::new(ArrayData::Ints(v))) };
         Value(TAG_ARR | usize_to_payload(box_ptr as usize))
     }
 
@@ -1574,8 +1634,9 @@ impl Value {
     #[inline]
     pub fn array_empty() -> Value {
         let heap = heap::current_heap();
-        let box_ptr =
-            unsafe { (*heap).alloc_box_kind(KIND_ARRAY, RefCell::new(ArrayData::Ints(Vec::new()))) };
+        let box_ptr = unsafe {
+            (*heap).alloc_box_kind(KIND_ARRAY, RefCell::new(ArrayData::Ints(Vec::new())))
+        };
         Value(TAG_ARR | usize_to_payload(box_ptr as usize))
     }
     #[inline]
@@ -1595,10 +1656,7 @@ impl Value {
     /// plain object). Class instances are created this way: property reads
     /// miss the own shape and fall through to the proto chain, which is what
     /// makes `o.m()` dispatch to the method on `C.prototype`.
-    pub fn object_ordered_with_proto(
-        entries: Vec<(String, Value)>,
-        proto: Value,
-    ) -> Value {
+    pub fn object_ordered_with_proto(entries: Vec<(String, Value)>, proto: Value) -> Value {
         let mut shape_map =
             hashbrown::HashMap::with_capacity_and_hasher(entries.len(), Default::default());
         let mut insertion_order = Vec::with_capacity(entries.len());
@@ -1727,12 +1785,10 @@ impl Value {
     /// same lazy props map closures use, read through the native's property
     /// path.
     #[inline]
-    pub fn native_with_props(
-        f: NativeFn,
-        proto: Value,
-        props: Vec<(String, Value)>,
-    ) -> Value {
-        let map = Rc::new(RefCell::new(props.into_iter().collect::<hashbrown::HashMap<_, _>>()));
+    pub fn native_with_props(f: NativeFn, proto: Value, props: Vec<(String, Value)>) -> Value {
+        let map = Rc::new(RefCell::new(
+            props.into_iter().collect::<hashbrown::HashMap<_, _>>(),
+        ));
         Value::misc(MiscBox::Native {
             f,
             proto,
@@ -2204,7 +2260,11 @@ impl Value {
         if let Some(n) = self.as_number() {
             n
         } else if let Some(b) = self.as_bool() {
-            if b { 1.0 } else { 0.0 }
+            if b {
+                1.0
+            } else {
+                0.0
+            }
         } else if let Some(i) = self.as_int() {
             i as f64
         } else if self.is_null() {
@@ -2682,9 +2742,7 @@ pub fn object_js_string(v: &Value) -> Option<String> {
     let od = od.borrow();
     if od.container == DATE_CONTAINER {
         // Date: its `toString` shape ("Wed Jan 01 2024 …"), matching Node.
-        return od
-            .get(DATE_MS_KEY)
-            .map(|x| date_to_string(x.to_number()));
+        return od.get(DATE_MS_KEY).map(|x| date_to_string(x.to_number()));
     }
     if od.container != 3 {
         return None;
@@ -3075,7 +3133,11 @@ pub fn date_parse(s: &str) -> f64 {
                     let start = i;
                     let frac = digits(b, &mut i, 9).unwrap_or(0);
                     let len = i - start;
-                    ms = if len >= 3 { frac % 1000 } else { frac * 10i64.pow((3 - len) as u32) };
+                    ms = if len >= 3 {
+                        frac % 1000
+                    } else {
+                        frac * 10i64.pow((3 - len) as u32)
+                    };
                 }
             }
         }
@@ -3175,7 +3237,11 @@ pub fn js_string_to_number(s: &str) -> f64 {
         _ => (false, t),
     };
     if rest == "Infinity" {
-        return if neg { f64::NEG_INFINITY } else { f64::INFINITY };
+        return if neg {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
     }
     let radix_fold = |rest: &str, radix: u32| -> f64 {
         let mut acc = 0.0f64;
@@ -3185,7 +3251,11 @@ pub fn js_string_to_number(s: &str) -> f64 {
                 None => return f64::NAN,
             }
         }
-        if neg { -acc } else { acc }
+        if neg {
+            -acc
+        } else {
+            acc
+        }
     };
     if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
         return radix_fold(hex, 16);
@@ -3214,7 +3284,11 @@ pub fn js_string_to_number(s: &str) -> f64 {
         None => mant,
     };
     let n = norm.parse::<f64>().unwrap_or(f64::NAN);
-    if neg { -n } else { n }
+    if neg {
+        -n
+    } else {
+        n
+    }
 }
 
 /// Coerce a value to its raw string form (strings unquoted), for JS-style
@@ -3302,7 +3376,9 @@ fn num_to_string(n: f64) -> String {
 /// Faster than `to_string` (no locale/width dispatch) for the JSON hot loop.
 #[inline]
 fn fast_itoa(mut v: u32) -> String {
-    if v == 0 { return "0".to_string(); }
+    if v == 0 {
+        return "0".to_string();
+    }
     let mut buf = [0u8; 7];
     let mut len = 0usize;
     while v > 0 {
@@ -3415,7 +3491,13 @@ impl fmt::Debug for Value {
         } else if let Some(m) = self.as_object() {
             write!(f, "Object({:?})", m.borrow())
         } else if let Some(fd) = self.as_function() {
-            write!(f, "Function(p{} @{}, {} upvalues)", fd.program, fd.ptr, fd.cells.len())
+            write!(
+                f,
+                "Function(p{} @{}, {} upvalues)",
+                fd.program,
+                fd.ptr,
+                fd.cells.len()
+            )
         } else if self.is_native() {
             write!(f, "NativeFunction")
         } else if let Some(p) = self.as_pointer() {
@@ -3426,7 +3508,12 @@ impl fmt::Debug for Value {
             write!(f, "Cell")
         } else if let Some(p) = self.as_promise() {
             let st = p.lock().unwrap_or_else(|g| g.into_inner());
-            write!(f, "Promise({:?}, {} conts)", st.status, st.continuations.len())
+            write!(
+                f,
+                "Promise({:?}, {} conts)",
+                st.status,
+                st.continuations.len()
+            )
         } else {
             write!(f, "Value")
         }
@@ -3516,7 +3603,10 @@ impl MarkState {
     /// Record a box as live without queuing it (promoted boxes are already
     /// fully traced by the promote walk; the sweep just needs to know them).
     pub fn insert_box(&mut self, heap: &ArenaHeap, addr: usize) {
-        if self.set.insert(addr) && heap.addr_in_old(addr) && heap.kind_of(addr) == KIND_STRING as u8 {
+        if self.set.insert(addr)
+            && heap.addr_in_old(addr)
+            && heap.kind_of(addr) == KIND_STRING as u8
+        {
             mark_string_subtree(heap, addr, &mut self.set);
         }
     }
@@ -3560,11 +3650,15 @@ fn promote_string_payload(heap: &mut ArenaHeap, copy: *mut AString, stack: &mut 
         let len = unsafe { (*copy).builder_len() };
         let old_bytes = unsafe { (*copy).builder_bytes() };
         let new_bytes = unsafe { heap.promote_bytes(old_bytes, len) };
-        unsafe { (*copy).set_builder_bytes(new_bytes); }
+        unsafe {
+            (*copy).set_builder_bytes(new_bytes);
+        }
     } else {
         let len = unsafe { (*copy).len };
         let old_bytes = unsafe { (*copy).bytes };
-        unsafe { (*copy).bytes = heap.promote_bytes(old_bytes, len); }
+        unsafe {
+            (*copy).bytes = heap.promote_bytes(old_bytes, len);
+        }
     }
 }
 
@@ -3752,7 +3846,9 @@ impl ContainerData {
         loop {
             let slot = unsafe { &*self.slots.add(i) };
             if slot.hash == h && slot.key.same_value_zero(&k) {
-                unsafe { (*self.slots.add(i)).val = v; }
+                unsafe {
+                    (*self.slots.add(i)).val = v;
+                }
                 return;
             }
             if slot.hash == 0 {
@@ -3920,9 +4016,10 @@ pub fn walk_container_entries(
             // survive a remap untouched.
             match slot.key.bits() & TAG_MASK {
                 TAG_OBJ | TAG_ARR | TAG_FN | TAG_CELL | TAG_MISC
-                    if (slot.key.hash_key() | 2) != slot.hash => {
-                        stale = true;
-                    }
+                    if (slot.key.hash_key() | 2) != slot.hash =>
+                {
+                    stale = true;
+                }
                 _ => {}
             }
         }
@@ -4029,10 +4126,14 @@ pub fn walk_value(
                             let right = unsafe { Value((*orig).len as u64) };
                             let (la, ra) = (payload_to_usize(left.0), payload_to_usize(right.0));
                             if let Some(&nl) = map.get(&la) {
-                                unsafe { (*copy).bytes = (TAG_STR | usize_to_payload(nl)) as *mut u8; }
+                                unsafe {
+                                    (*copy).bytes = (TAG_STR | usize_to_payload(nl)) as *mut u8;
+                                }
                             }
                             if let Some(&nr) = map.get(&ra) {
-                                unsafe { (*copy).len = (TAG_STR | usize_to_payload(nr)) as usize; }
+                                unsafe {
+                                    (*copy).len = (TAG_STR | usize_to_payload(nr)) as usize;
+                                }
                             }
                             if heap.addr_in_young(la) {
                                 fix.push(la);
@@ -4078,13 +4179,7 @@ pub fn walk_value(
                         // rebuilt against remapped addresses; the order list
                         // is remapped in place).
                         if let Some(cd) = inner.entries.as_mut() {
-                            walk_container_entries(
-                                cd,
-                                heap,
-                                map,
-                                visited,
-                                mark.as_deref_mut(),
-                            );
+                            walk_container_entries(cd, heap, map, visited, mark.as_deref_mut());
                         }
                     }
                 }
@@ -4102,7 +4197,13 @@ pub fn walk_value(
             let addr = payload_to_usize(v.0);
             if visited.insert(addr) {
                 let cell = unsafe { &*heap_ptr::<RefCell<Value>>(v.0) };
-                walk_value(heap, map, visited, mark.as_deref_mut(), &mut cell.borrow_mut());
+                walk_value(
+                    heap,
+                    map,
+                    visited,
+                    mark.as_deref_mut(),
+                    &mut cell.borrow_mut(),
+                );
             }
         }
         TAG_FN => {

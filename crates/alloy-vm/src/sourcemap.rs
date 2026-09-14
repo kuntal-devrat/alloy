@@ -53,7 +53,9 @@ pub fn decode_vlq(chars: &mut impl Iterator<Item = char>) -> Result<i64, String>
     let mut continuation = true;
 
     while continuation {
-        let ch = chars.next().ok_or_else(|| "Unexpected end of VLQ sequence".to_string())?;
+        let ch = chars
+            .next()
+            .ok_or_else(|| "Unexpected end of VLQ sequence".to_string())?;
         let digit = b64_to_val(ch)?;
         continuation = (digit & 0x20) != 0;
         let data = (digit & 0x1F) as u64;
@@ -193,33 +195,53 @@ impl SourceMap {
 
     /// Parse a SourceMap from standard V3 JSON.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let v: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| format!("Invalid JSON: {}", e))?;
-        
-        let version = v.get("version")
-            .and_then(|x| x.as_u64())
-            .ok_or_else(|| "Missing or invalid 'version'".to_string())? as u32;
+        let v: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| format!("Invalid JSON: {}", e))?;
+
+        let version =
+            v.get("version")
+                .and_then(|x| x.as_u64())
+                .ok_or_else(|| "Missing or invalid 'version'".to_string())? as u32;
         if version != 3 {
             return Err(format!("Unsupported sourcemap version: {}", version));
         }
 
-        let file = v.get("file").and_then(|x| x.as_str()).map(|s| s.to_string());
-        
-        let sources = v.get("sources")
+        let file = v
+            .get("file")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+
+        let sources = v
+            .get("sources")
             .and_then(|x| x.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let sources_content = v.get("sourcesContent")
+        let sources_content = v
+            .get("sourcesContent")
             .and_then(|x| x.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect());
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
 
-        let names = v.get("names")
+        let names = v
+            .get("names")
             .and_then(|x| x.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let mappings = v.get("mappings")
+        let mappings = v
+            .get("mappings")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
@@ -291,7 +313,9 @@ impl SourceMap {
                         if let (Some(s_idx), Some(s_line), Some(s_col)) =
                             (seg_src_idx, seg_src_line, seg_src_col)
                         {
-                            if line_gen_col as u32 <= gen_col.saturating_sub(1) || last_match.is_none() {
+                            if line_gen_col as u32 <= gen_col.saturating_sub(1)
+                                || last_match.is_none()
+                            {
                                 last_match = Some((s_idx, s_line, s_col, seg_name_idx));
                             }
                         }
@@ -345,7 +369,9 @@ mod tests {
 
     #[test]
     fn test_vlq_roundtrip() {
-        let values = [0, 1, -1, 15, -15, 16, -16, 31, -31, 32, -32, 100, -100, 1024, -1024, 1234567, -1234567];
+        let values = [
+            0, 1, -1, 15, -15, 16, -16, 31, -31, 32, -32, 100, -100, 1024, -1024, 1234567, -1234567,
+        ];
         for &v in &values {
             let encoded = encode_vlq(v);
             let decoded = decode_vlq(&mut encoded.chars()).expect("decode failed");
@@ -376,13 +402,10 @@ mod tests {
 
     #[test]
     fn test_sourcemap_lookup() {
-        let table = vec![
-            (0, 1, 1),
-            (10, 5, 3),
-            (25, 10, 8),
-        ];
-        let sm = SourceMap::from_line_table(Some("out.js".to_string()), "app.ajs".to_string(), &table);
-        
+        let table = vec![(0, 1, 1), (10, 5, 3), (25, 10, 8)];
+        let sm =
+            SourceMap::from_line_table(Some("out.js".to_string()), "app.ajs".to_string(), &table);
+
         let loc1 = sm.lookup(1, 1).expect("lookup line 1 failed");
         assert_eq!(loc1.source_file, "app.ajs");
         assert_eq!(loc1.line, 1);

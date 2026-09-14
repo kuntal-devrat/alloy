@@ -1,10 +1,10 @@
+use crate::vm::core::Vm;
+use crate::vm::ops_async::{Handler, ThrowResult};
+use crate::vm::stack::{CallFrame, OperandStack};
+use alloy_core::value::{Value, VmHost, SYMBOL_ITERATOR, SYMBOL_TO_STRING_TAG};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use alloy_core::value::{Value, VmHost, SYMBOL_ITERATOR, SYMBOL_TO_STRING_TAG};
-use crate::vm::core::Vm;
-use crate::vm::stack::{CallFrame, OperandStack};
-use crate::vm::ops_async::{Handler, ThrowResult};
 
 #[derive(Clone)]
 pub struct GeneratorState {
@@ -34,9 +34,7 @@ impl Vm {
             let err = args.first().cloned().unwrap_or(Value::undefined());
             vm.generator_step(gen_id, err, true)
         }));
-        let iter_fn = Value::native(Arc::new(|_args, vm| {
-            vm.this_value()
-        }));
+        let iter_fn = Value::native(Arc::new(|_args, vm| vm.this_value()));
 
         let mut props = hashbrown::HashMap::new();
         props.insert("next".to_string(), next_fn);

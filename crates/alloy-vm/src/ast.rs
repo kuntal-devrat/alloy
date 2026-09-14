@@ -14,23 +14,56 @@ pub enum Expr {
     /// `delete target`: member expressions delete the property/index, a plain
     /// identifier evaluates to false, anything else evaluates and yields true.
     Delete(Box<Expr>),
-    Assign { target: Box<Expr>, op: &'static str, value: Box<Expr> },
+    Assign {
+        target: Box<Expr>,
+        op: &'static str,
+        value: Box<Expr>,
+    },
     /// A call. `optional` is true when written `f?.()` — the args are not
     /// evaluated and the whole chain yields undefined when the callee is
     /// nullish.
-    Call { callee: Box<Expr>, args: Vec<Elem>, optional: bool },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Elem>,
+        optional: bool,
+    },
     /// A property read. `optional` is true when written `o?.p`.
-    Prop { obj: Box<Expr>, prop: String, optional: bool },
+    Prop {
+        obj: Box<Expr>,
+        prop: String,
+        optional: bool,
+    },
     /// An index read. `optional` is true when written `o?.[k]`.
-    Index { obj: Box<Expr>, index: Box<Expr>, optional: bool },
+    Index {
+        obj: Box<Expr>,
+        index: Box<Expr>,
+        optional: bool,
+    },
     Array(Vec<Elem>),
     Object(Vec<ObjElem>),
     Template(Vec<TemplatePart>),
-    Lambda { params: FnParams, body: Box<Stmt>, is_async: bool, is_generator: bool, is_arrow: bool },
-    Yield { value: Option<Box<Expr>>, delegate: bool },
+    Lambda {
+        params: FnParams,
+        body: Box<Stmt>,
+        is_async: bool,
+        is_generator: bool,
+        is_arrow: bool,
+    },
+    Yield {
+        value: Option<Box<Expr>>,
+        delegate: bool,
+    },
     Await(Box<Expr>),
-    Ternary { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
-    IncDec { target: Box<Expr>, is_inc: bool, is_prefix: bool },
+    Ternary {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
+    IncDec {
+        target: Box<Expr>,
+        is_inc: bool,
+        is_prefix: bool,
+    },
     /// Grouping parens `(expr)`: a thin wrapper the emitter unwraps. It exists
     /// so `(-2) ** 2` (a parenthesized unary, legal as the left operand of
     /// `**`) is distinguishable from the bare `-2 ** 2` SyntaxError.
@@ -42,20 +75,35 @@ pub enum Expr {
     Sequence(Vec<Expr>),
     /// `new C(args)` — allocate an instance (proto = `C.prototype`) and call
     /// the constructor with `this` bound to it.
-    New { callee: Box<Expr>, args: Vec<Elem> },
+    New {
+        callee: Box<Expr>,
+        args: Vec<Elem>,
+    },
     /// `super(args)` inside a derived class's constructor: call the parent
     /// constructor with the current `this`.
-    SuperCall { args: Vec<Elem> },
+    SuperCall {
+        args: Vec<Elem>,
+    },
     /// `super.m(args)` inside a method: look `m` up on the method's home
     /// object's parent prototype and call it with the current `this`.
     /// `args: None` is a bare `super.m` reference (no call).
-    SuperProp { prop: String, args: Option<Vec<Elem>> },
+    SuperProp {
+        prop: String,
+        args: Option<Vec<Elem>>,
+    },
     /// `class Name extends Parent { … }` / `class extends Parent { … }` —
     /// evaluates to the class (constructor) value.
-    Class { name: Option<String>, extends: Option<Box<Expr>>, methods: Vec<MethodDef> },
+    Class {
+        name: Option<String>,
+        extends: Option<Box<Expr>>,
+        methods: Vec<MethodDef>,
+    },
     /// `/pattern/flags` — a fresh regex object per evaluation (its own
     /// `lastIndex`), like JS.
-    Regex { pattern: String, flags: String },
+    Regex {
+        pattern: String,
+        flags: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,9 +257,9 @@ pub fn pat_bound_names(p: &Pat, out: &mut Vec<String>) {
         Pat::Object(elems) => {
             for el in elems {
                 match el {
-                    ObjPatElem::Key(_, sub) | ObjPatElem::Computed(_, sub) | ObjPatElem::Rest(sub) => {
-                        pat_bound_names(sub, out)
-                    }
+                    ObjPatElem::Key(_, sub)
+                    | ObjPatElem::Computed(_, sub)
+                    | ObjPatElem::Rest(sub) => pat_bound_names(sub, out),
                 }
             }
         }
@@ -255,26 +303,42 @@ pub fn stmt_uses_lexical(s: &Stmt, name: &str) -> bool {
         Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => {
             expr_uses_lexical(cond, name) || stmt_uses_lexical(body, name)
         }
-        Stmt::For { init, cond, update, body } => {
+        Stmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
             init.as_ref().is_some_and(|s| stmt_uses_lexical(s, name))
                 || cond.as_ref().is_some_and(|e| expr_uses_lexical(e, name))
                 || update.as_ref().is_some_and(|e| expr_uses_lexical(e, name))
                 || stmt_uses_lexical(body, name)
         }
-        Stmt::ForOf { iterable, body, .. } | Stmt::ForIn { obj: iterable, body, .. } => {
-            expr_uses_lexical(iterable, name) || stmt_uses_lexical(body, name)
-        }
+        Stmt::ForOf { iterable, body, .. }
+        | Stmt::ForIn {
+            obj: iterable,
+            body,
+            ..
+        } => expr_uses_lexical(iterable, name) || stmt_uses_lexical(body, name),
         Stmt::Block(stmts) => stmts.iter().any(|s| stmt_uses_lexical(s, name)),
         Stmt::Labeled { body, .. } => stmt_uses_lexical(body, name),
         Stmt::Throw(e) => expr_uses_lexical(e, name),
-        Stmt::Try { body, catch, finally } => {
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
             stmt_uses_lexical(body, name)
-                || catch.as_ref().is_some_and(|(_, b)| stmt_uses_lexical(b, name))
+                || catch
+                    .as_ref()
+                    .is_some_and(|(_, b)| stmt_uses_lexical(b, name))
                 || finally.as_ref().is_some_and(|b| stmt_uses_lexical(b, name))
         }
         Stmt::Switch { disc, cases } => {
             expr_uses_lexical(disc, name)
-                || cases.iter().any(|c| c.body.iter().any(|s| stmt_uses_lexical(s, name)))
+                || cases
+                    .iter()
+                    .any(|c| c.body.iter().any(|s| stmt_uses_lexical(s, name)))
         }
         // Own `this`/`arguments`.
         Stmt::FnDecl { .. } | Stmt::Class { .. } => false,
@@ -297,7 +361,9 @@ pub fn expr_uses_lexical(e: &Expr, name: &str) -> bool {
             expr_uses_lexical(callee, name) || args.iter().any(|a| expr_uses_lexical(&a.expr, name))
         }
         Expr::Prop { obj, .. } | Expr::IncDec { target: obj, .. } => expr_uses_lexical(obj, name),
-        Expr::Index { obj, index, .. } => expr_uses_lexical(obj, name) || expr_uses_lexical(index, name),
+        Expr::Index { obj, index, .. } => {
+            expr_uses_lexical(obj, name) || expr_uses_lexical(index, name)
+        }
         Expr::Array(elems) => elems.iter().any(|a| expr_uses_lexical(&a.expr, name)),
         Expr::Object(fields) => fields.iter().any(|f| match f {
             ObjElem::Pair(_, v) => expr_uses_lexical(v, name),
@@ -309,9 +375,10 @@ pub fn expr_uses_lexical(e: &Expr, name: &str) -> bool {
             TemplatePart::Lit(_) => false,
             // Interpolations are raw tokens; a conservative token scan
             // (a false positive only costs an extra hidden capture).
-            TemplatePart::Expr(ts) => {
-                ts.tokens.iter().any(|t| matches!(t, Token::Ident(n) if n == name))
-            }
+            TemplatePart::Expr(ts) => ts
+                .tokens
+                .iter()
+                .any(|t| matches!(t, Token::Ident(n) if n == name)),
         }),
         Expr::Ternary { cond, then, els } => {
             expr_uses_lexical(cond, name)
@@ -322,9 +389,10 @@ pub fn expr_uses_lexical(e: &Expr, name: &str) -> bool {
         Expr::New { callee, args } => {
             expr_uses_lexical(callee, name) || args.iter().any(|a| expr_uses_lexical(&a.expr, name))
         }
-        Expr::SuperCall { args } | Expr::SuperProp { args: Some(args), .. } => {
-            args.iter().any(|a| expr_uses_lexical(&a.expr, name))
-        }
+        Expr::SuperCall { args }
+        | Expr::SuperProp {
+            args: Some(args), ..
+        } => args.iter().any(|a| expr_uses_lexical(&a.expr, name)),
         Expr::SuperProp { args: None, .. } => false,
         // Nested arrows inherit this function's bindings; regular functions
         // (and class bodies/methods) bind their own.
@@ -338,40 +406,94 @@ pub fn expr_uses_lexical(e: &Expr, name: &str) -> bool {
 pub enum Stmt {
     Expr(Expr),
     /// `let a = 1, { b, c } = obj` — one or more declarators.
-    VarDecl { decls: Vec<(Pat, Option<Expr>)> },
-    FnDecl { name: String, params: FnParams, body: Box<Stmt>, is_async: bool, is_generator: bool },
+    VarDecl {
+        decls: Vec<(Pat, Option<Expr>)>,
+    },
+    FnDecl {
+        name: String,
+        params: FnParams,
+        body: Box<Stmt>,
+        is_async: bool,
+        is_generator: bool,
+    },
     Return(Option<Expr>),
-    If { cond: Expr, then: Box<Stmt>, els: Option<Box<Stmt>> },
-    While { cond: Expr, body: Box<Stmt> },
-    DoWhile { cond: Expr, body: Box<Stmt> },
-    For { init: Option<Box<Stmt>>, cond: Option<Expr>, update: Option<Expr>, body: Box<Stmt> },
-    ForOf { pat: Pat, declared: bool, iterable: Expr, body: Box<Stmt> },
-    ForIn { pat: Pat, declared: bool, obj: Expr, body: Box<Stmt> },
-    Import { src: String, kind: ImportKind },
+    If {
+        cond: Expr,
+        then: Box<Stmt>,
+        els: Option<Box<Stmt>>,
+    },
+    While {
+        cond: Expr,
+        body: Box<Stmt>,
+    },
+    DoWhile {
+        cond: Expr,
+        body: Box<Stmt>,
+    },
+    For {
+        init: Option<Box<Stmt>>,
+        cond: Option<Expr>,
+        update: Option<Expr>,
+        body: Box<Stmt>,
+    },
+    ForOf {
+        pat: Pat,
+        declared: bool,
+        iterable: Expr,
+        body: Box<Stmt>,
+    },
+    ForIn {
+        pat: Pat,
+        declared: bool,
+        obj: Expr,
+        body: Box<Stmt>,
+    },
+    Import {
+        src: String,
+        kind: ImportKind,
+    },
     Block(Vec<Stmt>),
     Break,
     Continue,
     BreakLabel(String),
     ContinueLabel(String),
-    Labeled { name: String, body: Box<Stmt> },
+    Labeled {
+        name: String,
+        body: Box<Stmt>,
+    },
     Throw(Expr),
     Try {
         body: Box<Stmt>,
         catch: Option<(String, Box<Stmt>)>,
         finally: Option<Box<Stmt>>,
     },
-    Switch { disc: Expr, cases: Vec<SwitchCase> },
+    Switch {
+        disc: Expr,
+        cases: Vec<SwitchCase>,
+    },
     /// `class Name extends Parent { … }` — a class declaration. The name is
     /// registered like a function declaration; the value is the class.
-    Class { name: String, extends: Option<Expr>, methods: Vec<MethodDef> },
+    Class {
+        name: String,
+        extends: Option<Expr>,
+        methods: Vec<MethodDef>,
+    },
     /// `export let a = 1, b = 2` / `export function f() {}` /
     /// `export { a, b }` / `export { a as c }` / `export default expr`.
     /// `pairs` is (public export name, source binding name) — an alias is
     /// `("c", "a")`, a plain declaration `("a", "a")`, and `export default`
     /// `("default", "\0default")`. `stmt` is the declaration to emit (Nop
     /// for the `export { ... }` forms); `default` marks the stored-value form.
-    Export { pairs: Vec<(String, String)>, stmt: Box<Stmt>, default: bool },
-    Loc { line: u32, col: u32, stmt: Box<Stmt> },
+    Export {
+        pairs: Vec<(String, String)>,
+        stmt: Box<Stmt>,
+        default: bool,
+    },
+    Loc {
+        line: u32,
+        col: u32,
+        stmt: Box<Stmt>,
+    },
     Nop,
 }
 
@@ -407,9 +529,14 @@ pub struct SwitchCase {
 pub fn pat_names(p: &Pat) -> Vec<String> {
     match p {
         Pat::Bind(n) => vec![n.clone()],
-        Pat::Object(fields) => fields.iter().flat_map(|e| match e {
-            ObjPatElem::Key(_, p) | ObjPatElem::Computed(_, p) | ObjPatElem::Rest(p) => pat_names(p),
-        }).collect(),
+        Pat::Object(fields) => fields
+            .iter()
+            .flat_map(|e| match e {
+                ObjPatElem::Key(_, p) | ObjPatElem::Computed(_, p) | ObjPatElem::Rest(p) => {
+                    pat_names(p)
+                }
+            })
+            .collect(),
         Pat::Array(elems) => elems
             .iter()
             .flat_map(|e| match e {

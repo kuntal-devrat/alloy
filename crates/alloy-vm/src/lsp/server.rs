@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use super::docs::get_hover_doc;
+use super::protocol::*;
 use crate::ast::{MethodKind, Stmt};
 use crate::compiler::lexer::Lexer;
 use crate::compiler::parser::Parser;
-use super::docs::get_hover_doc;
-use super::protocol::*;
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
 
 pub struct LspServer {
     pub documents: HashMap<String, String>,
@@ -32,8 +32,14 @@ impl LspServer {
                 let col = lexer.cur_col().saturating_sub(1);
                 return vec![Diagnostic {
                     range: Range {
-                        start: Position { line, character: col },
-                        end: Position { line, character: col + 1 },
+                        start: Position {
+                            line,
+                            character: col,
+                        },
+                        end: Position {
+                            line,
+                            character: col + 1,
+                        },
                     },
                     severity: Some(1), // Error
                     source: Some("alloy".to_string()),
@@ -49,8 +55,14 @@ impl LspServer {
             let col = c.saturating_sub(1);
             return vec![Diagnostic {
                 range: Range {
-                    start: Position { line, character: col },
-                    end: Position { line, character: col + 1 },
+                    start: Position {
+                        line,
+                        character: col,
+                    },
+                    end: Position {
+                        line,
+                        character: col + 1,
+                    },
                 },
                 severity: Some(1),
                 source: Some("alloy".to_string()),
@@ -102,19 +114,58 @@ impl LspServer {
 
     pub fn handle_completion(&self) -> CompletionList {
         let keywords = [
-            "async", "await", "break", "case", "catch", "class", "const", "continue",
-            "debugger", "default", "delete", "do", "else", "export", "extends", "finally",
-            "for", "function", "if", "import", "in", "instanceof", "let", "new", "return",
-            "super", "switch", "this", "throw", "try", "typeof", "var", "void", "while",
-            "with", "yield",
+            "async",
+            "await",
+            "break",
+            "case",
+            "catch",
+            "class",
+            "const",
+            "continue",
+            "debugger",
+            "default",
+            "delete",
+            "do",
+            "else",
+            "export",
+            "extends",
+            "finally",
+            "for",
+            "function",
+            "if",
+            "import",
+            "in",
+            "instanceof",
+            "let",
+            "new",
+            "return",
+            "super",
+            "switch",
+            "this",
+            "throw",
+            "try",
+            "typeof",
+            "var",
+            "void",
+            "while",
+            "with",
+            "yield",
         ];
 
         let builtins = [
             ("channel", 3, "channel(): Channel (cross-actor channel)"),
             ("spawn", 3, "spawn(fn, ...args): Actor (background actor)"),
-            ("fetchSync", 3, "fetchSync(url, opts): Response (sync HTTP/HTTPS)"),
+            (
+                "fetchSync",
+                3,
+                "fetchSync(url, opts): Response (sync HTTP/HTTPS)",
+            ),
             ("print", 3, "print(...args): void (output to stdout)"),
-            ("structuredClone", 3, "structuredClone(val): val (deep copy)"),
+            (
+                "structuredClone",
+                3,
+                "structuredClone(val): val (deep copy)",
+            ),
             ("http", 9, "http module (embedded high-speed web server)"),
             ("memory", 9, "memory module (sidecar IPC shared memory)"),
             ("fs", 9, "fs module (synchronous file operations)"),
@@ -203,7 +254,7 @@ impl LspServer {
                         },
                         server_info: ServerInfo {
                             name: "alloy-lsp".to_string(),
-                            version: "0.1.0".to_string(),
+                            version: "0.2.0".to_string(),
                         },
                     };
                     responses.push(JsonRpcMessage {
@@ -220,7 +271,9 @@ impl LspServer {
                 }
                 "textDocument/didOpen" => {
                     if let Some(ref params_val) = msg.params {
-                        if let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(params_val.clone()) {
+                        if let Ok(params) =
+                            serde_json::from_value::<DidOpenTextDocumentParams>(params_val.clone())
+                        {
                             let uri = params.text_document.uri;
                             let text = params.text_document.text;
                             let diags = self.parse_diagnostics(&text);
@@ -243,7 +296,9 @@ impl LspServer {
                 }
                 "textDocument/didChange" => {
                     if let Some(ref params_val) = msg.params {
-                        if let Ok(params) = serde_json::from_value::<DidChangeTextDocumentParams>(params_val.clone()) {
+                        if let Ok(params) = serde_json::from_value::<DidChangeTextDocumentParams>(
+                            params_val.clone(),
+                        ) {
                             let uri = params.text_document.uri;
                             if let Some(change) = params.content_changes.into_iter().next() {
                                 let diags = self.parse_diagnostics(&change.text);
@@ -267,7 +322,9 @@ impl LspServer {
                 }
                 "textDocument/didClose" => {
                     if let Some(ref params_val) = msg.params {
-                        if let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(params_val.clone()) {
+                        if let Ok(params) =
+                            serde_json::from_value::<DidCloseTextDocumentParams>(params_val.clone())
+                        {
                             self.documents.remove(&params.text_document.uri);
                             let diag_params = PublishDiagnosticsParams {
                                 uri: params.text_document.uri,
@@ -286,14 +343,18 @@ impl LspServer {
                 }
                 "textDocument/hover" => {
                     if let Some(ref params_val) = msg.params {
-                        if let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params_val.clone()) {
+                        if let Ok(params) =
+                            serde_json::from_value::<TextDocumentPositionParams>(params_val.clone())
+                        {
                             let hover = self.handle_hover(params);
                             responses.push(JsonRpcMessage {
                                 jsonrpc: "2.0".to_string(),
                                 id: msg.id,
                                 method: None,
                                 params: None,
-                                result: Some(serde_json::to_value(hover).unwrap_or(serde_json::Value::Null)),
+                                result: Some(
+                                    serde_json::to_value(hover).unwrap_or(serde_json::Value::Null),
+                                ),
                                 error: None,
                             });
                         }
@@ -312,7 +373,9 @@ impl LspServer {
                 }
                 "textDocument/documentSymbol" => {
                     if let Some(ref params_val) = msg.params {
-                        if let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params_val.clone()) {
+                        if let Ok(params) =
+                            serde_json::from_value::<DocumentSymbolParams>(params_val.clone())
+                        {
                             let syms = self.handle_document_symbols(&params.text_document.uri);
                             responses.push(JsonRpcMessage {
                                 jsonrpc: "2.0".to_string(),
@@ -373,12 +436,24 @@ fn collect_symbols(stmts: &[Stmt], symbols: &mut Vec<DocumentSymbol>) {
                             name: name.clone(),
                             kind: 12, // Function
                             range: Range {
-                                start: Position { line: l, character: c },
-                                end: Position { line: l + 1, character: 0 },
+                                start: Position {
+                                    line: l,
+                                    character: c,
+                                },
+                                end: Position {
+                                    line: l + 1,
+                                    character: 0,
+                                },
                             },
                             selection_range: Range {
-                                start: Position { line: l, character: c },
-                                end: Position { line: l, character: c + name.len() as u32 },
+                                start: Position {
+                                    line: l,
+                                    character: c,
+                                },
+                                end: Position {
+                                    line: l,
+                                    character: c + name.len() as u32,
+                                },
                             },
                             detail: Some(format!("function {}", name)),
                             children: None,
@@ -389,20 +464,36 @@ fn collect_symbols(stmts: &[Stmt], symbols: &mut Vec<DocumentSymbol>) {
                         for m in methods {
                             let k = match m.kind {
                                 MethodKind::Field => 8, // Field
-                                _ => 6, // Method
+                                _ => 6,                 // Method
                             };
                             children.push(DocumentSymbol {
                                 name: m.name.clone(),
                                 kind: k,
                                 range: Range {
-                                    start: Position { line: l, character: c },
-                                    end: Position { line: l + 1, character: 0 },
+                                    start: Position {
+                                        line: l,
+                                        character: c,
+                                    },
+                                    end: Position {
+                                        line: l + 1,
+                                        character: 0,
+                                    },
                                 },
                                 selection_range: Range {
-                                    start: Position { line: l, character: c },
-                                    end: Position { line: l, character: c + m.name.len() as u32 },
+                                    start: Position {
+                                        line: l,
+                                        character: c,
+                                    },
+                                    end: Position {
+                                        line: l,
+                                        character: c + m.name.len() as u32,
+                                    },
                                 },
-                                detail: Some(if m.is_static { format!("static {}", m.name) } else { m.name.clone() }),
+                                detail: Some(if m.is_static {
+                                    format!("static {}", m.name)
+                                } else {
+                                    m.name.clone()
+                                }),
                                 children: None,
                             });
                         }
@@ -410,15 +501,31 @@ fn collect_symbols(stmts: &[Stmt], symbols: &mut Vec<DocumentSymbol>) {
                             name: name.clone(),
                             kind: 5, // Class
                             range: Range {
-                                start: Position { line: l, character: c },
-                                end: Position { line: l + 1, character: 0 },
+                                start: Position {
+                                    line: l,
+                                    character: c,
+                                },
+                                end: Position {
+                                    line: l + 1,
+                                    character: 0,
+                                },
                             },
                             selection_range: Range {
-                                start: Position { line: l, character: c },
-                                end: Position { line: l, character: c + name.len() as u32 },
+                                start: Position {
+                                    line: l,
+                                    character: c,
+                                },
+                                end: Position {
+                                    line: l,
+                                    character: c + name.len() as u32,
+                                },
                             },
                             detail: Some(format!("class {}", name)),
-                            children: if children.is_empty() { None } else { Some(children) },
+                            children: if children.is_empty() {
+                                None
+                            } else {
+                                Some(children)
+                            },
                         });
                     }
                     Stmt::VarDecl { decls } => {
@@ -430,12 +537,24 @@ fn collect_symbols(stmts: &[Stmt], symbols: &mut Vec<DocumentSymbol>) {
                                     name: n.clone(),
                                     kind: 13, // Variable
                                     range: Range {
-                                        start: Position { line: l, character: c },
-                                        end: Position { line: l + 1, character: 0 },
+                                        start: Position {
+                                            line: l,
+                                            character: c,
+                                        },
+                                        end: Position {
+                                            line: l + 1,
+                                            character: 0,
+                                        },
                                     },
                                     selection_range: Range {
-                                        start: Position { line: l, character: c },
-                                        end: Position { line: l, character: c + n.len() as u32 },
+                                        start: Position {
+                                            line: l,
+                                            character: c,
+                                        },
+                                        end: Position {
+                                            line: l,
+                                            character: c + n.len() as u32,
+                                        },
                                     },
                                     detail: Some(format!("var {}", n)),
                                     children: None,
@@ -471,9 +590,12 @@ pub fn read_framed_message<R: BufRead>(reader: &mut R) -> std::io::Result<Option
             // End of headers
             break;
         }
-        if let Some(rest) = trimmed.strip_prefix("Content-Length:") {
-            if let Ok(len) = rest.trim().parse::<usize>() {
-                content_length = Some(len);
+        if let Some(colon_idx) = trimmed.find(':') {
+            let (header_name, header_val) = trimmed.split_at(colon_idx);
+            if header_name.trim().eq_ignore_ascii_case("content-length") {
+                if let Ok(len) = header_val[1..].trim().parse::<usize>() {
+                    content_length = Some(len);
+                }
             }
         }
     }
@@ -490,7 +612,8 @@ pub fn read_framed_message<R: BufRead>(reader: &mut R) -> std::io::Result<Option
 }
 
 pub fn write_framed_message<W: Write>(writer: &mut W, msg: &JsonRpcMessage) -> std::io::Result<()> {
-    let json_bytes = serde_json::to_vec(msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let json_bytes = serde_json::to_vec(msg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let header = format!("Content-Length: {}\r\n\r\n", json_bytes.len());
     writer.write_all(header.as_bytes())?;
     writer.write_all(&json_bytes)?;

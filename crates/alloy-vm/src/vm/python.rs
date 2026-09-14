@@ -1,9 +1,9 @@
 use std::sync::{mpsc, Arc, Mutex};
 
-use alloy_core::value::{PromiseState, PromiseStatus, Value, VmHost};
 use crate::python_sidecar::{PyArg, PythonSidecar};
+use alloy_core::value::{PromiseState, PromiseStatus, Value, VmHost};
 
-use super::core::{PYTHON_CALL_TIMEOUT_MS, PYTHON_POOL_SIZE, Vm};
+use super::core::{Vm, PYTHON_CALL_TIMEOUT_MS, PYTHON_POOL_SIZE};
 
 /// One queued call to a sidecar's dedicated worker thread.
 pub(crate) struct PyRequest {
@@ -138,13 +138,14 @@ impl PythonWorker {
                     .unwrap_or(PYTHON_CALL_TIMEOUT_MS),
             )
         });
-        let sidecar = match PythonSidecar::start(&self.path, self.cap, self.base, &self.py_file, timeout) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("alloy python pool growth error: {}", e);
-                return false;
-            }
-        };
+        let sidecar =
+            match PythonSidecar::start(&self.path, self.cap, self.base, &self.py_file, timeout) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("alloy python pool growth error: {}", e);
+                    return false;
+                }
+            };
         let idx = self.senders.len();
         let pid = sidecar.pid();
         let sidecar = Arc::new(Mutex::new(sidecar));
@@ -307,9 +308,7 @@ impl Vm {
     }
 
     pub(crate) fn python_module(&mut self, src: &str) -> Value {
-        let canon = self
-            .resolve_py_path(src)
-            .unwrap_or_else(|| src.to_string());
+        let canon = self.resolve_py_path(src).unwrap_or_else(|| src.to_string());
         if !self.ensure_python_current(&canon) {
             return Value::undefined();
         }
@@ -416,11 +415,20 @@ impl Vm {
                 let burst2 = self.py_registry.burst(&src);
                 call.burst = burst2;
                 self.python_inflight_calls.insert(id, call.clone());
-                if !self.python_send(&src, PyRequest { id, line: call.line.clone() }) {
+                if !self.python_send(
+                    &src,
+                    PyRequest {
+                        id,
+                        line: call.line.clone(),
+                    },
+                ) {
                     self.python_inflight = self.python_inflight.saturating_sub(1);
                     self.python_inflight_calls.remove(&id);
                     if let Some(pr) = call.promise.as_promise() {
-                        self.reject_promise(pr, Value::string("python sidecar is not running".to_string()));
+                        self.reject_promise(
+                            pr,
+                            Value::string("python sidecar is not running".to_string()),
+                        );
                     }
                 }
                 continue;

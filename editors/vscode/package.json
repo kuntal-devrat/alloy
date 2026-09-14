@@ -2,7 +2,7 @@
   "name": "alloy-vscode",
   "displayName": "Alloy Language Support",
   "description": "Rich language support, syntax highlighting, and LSP integration for the Alloy runtime (.ajs)",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "alloy-lang",
   "engines": {
     "vscode": "^1.75.0"

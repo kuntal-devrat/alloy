@@ -2,12 +2,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::opcode::Opcode;
 use alloy_core::regex;
 use alloy_core::value::{
     to_string_js, ArrayData, ChannelItem, FunctionData, ObjectData, PromiseStatus, RcDirtyRef,
     Value, VmHost, SYMBOL_ITERATOR, SYMBOL_TO_STRING_TAG,
 };
-use crate::opcode::Opcode;
 
 use super::alu::*;
 use super::builtins::arrays::*;
@@ -15,10 +15,10 @@ use super::builtins::containers::*;
 use super::builtins::numbers::*;
 use super::builtins::strings::*;
 use super::cache::{ic_slot, CallIcEntry, IcEntry};
-use super::core::{op_hist, unwrap_cell, FRAME_BUDGET, MAX_CALL_DEPTH, STACK_SIZE, Vm};
-use super::spawn::{decode_spawn_value, write_spawn_value};
+use super::core::{op_hist, unwrap_cell, Vm, FRAME_BUDGET, MAX_CALL_DEPTH, STACK_SIZE};
 use super::ops_async::{Continuation, Handler, ThrowResult};
-use super::stack::{CallFrame, KIND_INT, KIND_NUMBER, KIND_OTHER, kind_of_value};
+use super::spawn::{decode_spawn_value, write_spawn_value};
+use super::stack::{kind_of_value, CallFrame, KIND_INT, KIND_NUMBER, KIND_OTHER};
 
 impl Vm {
     pub(crate) fn dispatch(&mut self, pc: usize) -> Value {
@@ -69,12 +69,17 @@ impl Vm {
             // (Forward jumps and fall-through cost one predictable branch.)
             let op = match Opcode::from_u8(op_byte) {
                 Some(o) => o,
-                None => { pc += 1; continue; }
+                None => {
+                    pc += 1;
+                    continue;
+                }
             };
             match op {
                 Opcode::Halt => break,
 
-                Opcode::Nop => { pc += 1; }
+                Opcode::Nop => {
+                    pc += 1;
+                }
 
                 Opcode::LoadConst => {
                     let idx = self.read_u16(pc + 1);
@@ -87,10 +92,22 @@ impl Vm {
                     self.push(Value::int(val));
                     pc += 5;
                 }
-                Opcode::LoadTrue => { self.push(Value::bool(true)); pc += 1; }
-                Opcode::LoadFalse => { self.push(Value::bool(false)); pc += 1; }
-                Opcode::LoadNull => { self.push(Value::null()); pc += 1; }
-                Opcode::LoadUndefined => { self.push(Value::undefined()); pc += 1; }
+                Opcode::LoadTrue => {
+                    self.push(Value::bool(true));
+                    pc += 1;
+                }
+                Opcode::LoadFalse => {
+                    self.push(Value::bool(false));
+                    pc += 1;
+                }
+                Opcode::LoadNull => {
+                    self.push(Value::null());
+                    pc += 1;
+                }
+                Opcode::LoadUndefined => {
+                    self.push(Value::undefined());
+                    pc += 1;
+                }
 
                 Opcode::LoadLocal => {
                     let slot = self.bytecode[pc + 1] as usize;
@@ -133,8 +150,7 @@ impl Vm {
                         // JS: reading an undeclared identifier is a
                         // ReferenceError (a `let` that was never assigned is
                         // defined; a name that was never declared is not).
-                        let name = self
-                            .programs[self.program_id as usize]
+                        let name = self.programs[self.program_id as usize]
                             .globals
                             .get(idx)
                             .cloned()
@@ -196,8 +212,7 @@ impl Vm {
                     // `modules` view and must never leak into the requirer's
                     // namespace (or vice versa).
                     if !self.modules.contains_key(&self.program_id) {
-                        if let Some(name) = self
-                            .programs[self.program_id as usize]
+                        if let Some(name) = self.programs[self.program_id as usize]
                             .globals
                             .get(idx)
                             .cloned()
@@ -406,7 +421,6 @@ impl Vm {
                 }
 
                 // ---- Fused superinstructions ----
-
                 Opcode::CmpLocalInt => {
                     // r{slot} cmp imm : one dispatch for `i < 1000` style.
                     // When the slot's feedback kind is INT/NUMBER, the
@@ -420,8 +434,12 @@ impl Vm {
                     let idx = base + slot;
                     let result = if idx < self.stack.len() {
                         match self.stack.kind_of(idx) {
-                            KIND_INT => cmp_i64(Value::int_bits_raw(self.stack.at(idx).bits()), imm, cmp),
-                            KIND_NUMBER => cmp_f64(f64::from_bits(self.stack.at(idx).bits()), imm as f64, cmp),
+                            KIND_INT => {
+                                cmp_i64(Value::int_bits_raw(self.stack.at(idx).bits()), imm, cmp)
+                            }
+                            KIND_NUMBER => {
+                                cmp_f64(f64::from_bits(self.stack.at(idx).bits()), imm as f64, cmp)
+                            }
                             _ => compare_values(&self.slot_value(idx), &Value::int(imm), cmp),
                         }
                     } else {
@@ -569,8 +587,7 @@ impl Vm {
                     let base = self.call_stack.last().map(|f| f.base_slot).unwrap_or(0);
                     let n = count * 5;
                     let mut ops = [0u8; 125];
-                    ops[..n]
-                        .copy_from_slice(&self.bytecode[pc + 3..pc + 3 + n]);
+                    ops[..n].copy_from_slice(&self.bytecode[pc + 3..pc + 3 + n]);
                     let mut j = 0;
                     let mut acc_i: i64 = 0;
                     let mut acc: Value = Value::undefined();
@@ -585,7 +602,11 @@ impl Vm {
                             | ((ops[j * 5 + 2] as u32) << 16)
                             | ((ops[j * 5 + 3] as u32) << 8)
                             | (ops[j * 5 + 4] as u32);
-                        let imm = if u & 0x8000_0000 != 0 { u as i32 as i64 } else { u as i64 };
+                        let imm = if u & 0x8000_0000 != 0 {
+                            u as i32 as i64
+                        } else {
+                            u as i64
+                        };
                         j += 1;
                         match kind {
                             0 => {
@@ -834,13 +855,19 @@ impl Vm {
                                 f64::from_bits(self.stack.at(ib).bits()),
                                 cmp,
                             ),
-                            _ => {
-                                compare_values(&self.slot_value(ia), &self.slot_value(ib), cmp)
-                            }
+                            _ => compare_values(&self.slot_value(ia), &self.slot_value(ib), cmp),
                         }
                     } else {
-                        let va = if ia < self.stack.len() { self.slot_value(ia) } else { Value::undefined() };
-                        let vb = if ib < self.stack.len() { self.slot_value(ib) } else { Value::undefined() };
+                        let va = if ia < self.stack.len() {
+                            self.slot_value(ia)
+                        } else {
+                            Value::undefined()
+                        };
+                        let vb = if ib < self.stack.len() {
+                            self.slot_value(ib)
+                        } else {
+                            Value::undefined()
+                        };
                         compare_values(&va, &vb, cmp)
                     };
                     self.push(Value::bool(result));
@@ -1221,7 +1248,8 @@ impl Vm {
                             let iter_method = od.borrow().get(&sym_key).cloned();
                             if let Some(im) = iter_method {
                                 if im.is_function() || im.is_native() {
-                                    let iter_obj = self.call_value_with_this(&im, Some(v.clone()), &[]);
+                                    let iter_obj =
+                                        self.call_value_with_this(&im, Some(v.clone()), &[]);
                                     let arr = self.drain_iterator(&iter_obj);
                                     self.push(arr);
                                 } else {
@@ -1236,7 +1264,9 @@ impl Vm {
                                     iterable_display(&v)
                                 ))) {
                                     ThrowResult::Jump(p) => pc = p,
-                                    ThrowResult::EndDispatch | ThrowResult::Abort => pc = usize::MAX,
+                                    ThrowResult::EndDispatch | ThrowResult::Abort => {
+                                        pc = usize::MAX
+                                    }
                                 }
                                 continue;
                             }
@@ -1326,14 +1356,7 @@ impl Vm {
                         self.push(a);
                     }
                     let keep = matches!(op, Opcode::CallMethod);
-                    pc = self.dispatch_call(
-                        callee,
-                        argc,
-                        pc + 2,
-                        keep,
-                        Some(this_slot),
-                        false,
-                    );
+                    pc = self.dispatch_call(callee, argc, pc + 2, keep, Some(this_slot), false);
                     if pc == usize::MAX {
                         break;
                     }
@@ -1428,14 +1451,7 @@ impl Vm {
                     }
                     let base_slot = self.stack.len() - argc;
                     let inst_slot = base_slot.saturating_sub(1);
-                    pc = self.dispatch_call(
-                        callee,
-                        argc,
-                        pc + 2,
-                        true,
-                        Some(inst_slot),
-                        true,
-                    );
+                    pc = self.dispatch_call(callee, argc, pc + 2, true, Some(inst_slot), true);
                     if pc == usize::MAX {
                         break;
                     }
@@ -1496,14 +1512,8 @@ impl Vm {
                     }
                     let base_slot = self.stack.len() - args.len();
                     let inst_slot = base_slot.saturating_sub(1);
-                    pc = self.dispatch_call(
-                        callee,
-                        args.len(),
-                        pc + 4,
-                        true,
-                        Some(inst_slot),
-                        true,
-                    );
+                    pc =
+                        self.dispatch_call(callee, args.len(), pc + 4, true, Some(inst_slot), true);
                     if pc == usize::MAX {
                         break;
                     }
@@ -1640,7 +1650,8 @@ impl Vm {
                     self.record_local(idx);
                     while self.stack.len() <= idx {
                         self.stack.push(Value::undefined());
-                    }                        *self.stack.at_mut(idx) = promise.clone();
+                    }
+                    *self.stack.at_mut(idx) = promise.clone();
                     self.stack.mark_kind(idx, KIND_OTHER);
                     if let Some(f) = self.call_stack.last_mut() {
                         f.promise_slot = Some(slot as u8);
@@ -1658,87 +1669,87 @@ impl Vm {
                             }
                             // Awaiting a rejected promise throws the
                             // rejection reason, like JS.
-                            PromiseStatus::Rejected(v) => {
-                                match self.throw_value(v) {
-                                    ThrowResult::Jump(p) => pc = p,
-                                    ThrowResult::EndDispatch => break,
-                                    ThrowResult::Abort => break,
-                                }
-                            }
+                            PromiseStatus::Rejected(v) => match self.throw_value(v) {
+                                ThrowResult::Jump(p) => pc = p,
+                                ThrowResult::EndDispatch => break,
+                                ThrowResult::Abort => break,
+                            },
                             PromiseStatus::Pending => {
-                                    // Find the innermost async invocation and
-                                    // suspend it, returning its promise to the
-                                    // caller.
-                                    let boundary = match self
-                                        .call_stack
-                                        .iter()
-                                        .rposition(|f| f.promise_slot.is_some())
-                                    {
-                                        Some(i) => i,
-                                        None => {
-                                            // Defensive: no async frame.
-                                            self.push(Value::undefined());
-                                            pc += 1;
-                                            continue;
-                                        }
-                                    };
-                                    let b = self.call_stack[boundary].clone();
-                                    let id = self.next_cont_id;
-                                    self.next_cont_id += 1;
-                                    self.call_stack[boundary].resumed = true;
-                                    // The saved stack starts at the boundary
-                                    // frame's base, so rebase the saved frames'
-                                    // slots to match (the caller's region below
-                                    // is not part of this continuation).
-                                    let mut frames: Vec<CallFrame> =
-                                        self.call_stack[boundary..].to_vec();
-                                    for f in frames.iter_mut() {
-                                        f.base_slot -= b.base_slot;
-                                        f.cells_len -= b.cells_len;
-                                        f.handlers_len -= b.handlers_len;
-                                        f.locals_end -= b.base_slot;
+                                // Find the innermost async invocation and
+                                // suspend it, returning its promise to the
+                                // caller.
+                                let boundary = match self
+                                    .call_stack
+                                    .iter()
+                                    .rposition(|f| f.promise_slot.is_some())
+                                {
+                                    Some(i) => i,
+                                    None => {
+                                        // Defensive: no async frame.
+                                        self.push(Value::undefined());
+                                        pc += 1;
+                                        continue;
                                     }
-                                    // The saved frames' exception handlers move
-                                    // with the continuation; the caller's stay
-                                    // active.
-                                    let saved_handlers =
-                                        self.handlers[b.handlers_len..].to_vec();
-                                    self.handlers.truncate(b.handlers_len);
-                                    self.continuations.insert(
-                                        id,
-                                        Continuation::Suspended {
-                                            stack: self.stack.save_from(b.base_slot),
-                                            frames,
-                                            cells: self.cells_stack[b.cells_len..].to_vec(),
-                                            handlers: saved_handlers,
-                                            pc: pc + 1,
-                                            program_id: self.program_id,
-                                        },
-                                    );
-                                    p.lock()
-                                        .unwrap_or_else(|g| g.into_inner())
-                                        .continuations
-                                        .push(id);
-                                    // Return the async invocation's own promise
-                                    // to its caller (skipped for keep=0
-                                    // statement-position calls, which discard
-                                    // it — the continuation still runs).
-                                    let own = self.stack.at(b.base_slot + b.promise_slot.unwrap() as usize).clone();
-                                    self.stack.truncate(b.base_slot);
-                                    self.call_stack.truncate(boundary);
-                                    self.cells_stack.truncate(b.cells_len);
-                                    if b.keep_result {
-                                        self.push(own);
-                                    }
-                                    pc = b.return_addr;
+                                };
+                                let b = self.call_stack[boundary].clone();
+                                let id = self.next_cont_id;
+                                self.next_cont_id += 1;
+                                self.call_stack[boundary].resumed = true;
+                                // The saved stack starts at the boundary
+                                // frame's base, so rebase the saved frames'
+                                // slots to match (the caller's region below
+                                // is not part of this continuation).
+                                let mut frames: Vec<CallFrame> =
+                                    self.call_stack[boundary..].to_vec();
+                                for f in frames.iter_mut() {
+                                    f.base_slot -= b.base_slot;
+                                    f.cells_len -= b.cells_len;
+                                    f.handlers_len -= b.handlers_len;
+                                    f.locals_end -= b.base_slot;
                                 }
+                                // The saved frames' exception handlers move
+                                // with the continuation; the caller's stay
+                                // active.
+                                let saved_handlers = self.handlers[b.handlers_len..].to_vec();
+                                self.handlers.truncate(b.handlers_len);
+                                self.continuations.insert(
+                                    id,
+                                    Continuation::Suspended {
+                                        stack: self.stack.save_from(b.base_slot),
+                                        frames,
+                                        cells: self.cells_stack[b.cells_len..].to_vec(),
+                                        handlers: saved_handlers,
+                                        pc: pc + 1,
+                                        program_id: self.program_id,
+                                    },
+                                );
+                                p.lock()
+                                    .unwrap_or_else(|g| g.into_inner())
+                                    .continuations
+                                    .push(id);
+                                // Return the async invocation's own promise
+                                // to its caller (skipped for keep=0
+                                // statement-position calls, which discard
+                                // it — the continuation still runs).
+                                let own = self
+                                    .stack
+                                    .at(b.base_slot + b.promise_slot.unwrap() as usize)
+                                    .clone();
+                                self.stack.truncate(b.base_slot);
+                                self.call_stack.truncate(boundary);
+                                self.cells_stack.truncate(b.cells_len);
+                                if b.keep_result {
+                                    self.push(own);
+                                }
+                                pc = b.return_addr;
                             }
-                        } else {
-                            // Await on a non-promise: pass through.
-                            self.push(val);
-                            pc += 1;
                         }
+                    } else {
+                        // Await on a non-promise: pass through.
+                        self.push(val);
+                        pc += 1;
                     }
+                }
 
                 Opcode::MakeArray => {
                     let count = self.read_u16(pc + 1) as usize;
@@ -2142,16 +2153,12 @@ impl Vm {
                     let idx = base + slot;
                     let result = if idx < self.stack.len() {
                         match self.stack.kind_of(idx) {
-                            KIND_INT => cmp_i64(
-                                Value::int_bits_raw(self.stack.at(idx).bits()),
-                                imm,
-                                cmp,
-                            ),
-                            KIND_NUMBER => cmp_f64(
-                                f64::from_bits(self.stack.at(idx).bits()),
-                                imm as f64,
-                                cmp,
-                            ),
+                            KIND_INT => {
+                                cmp_i64(Value::int_bits_raw(self.stack.at(idx).bits()), imm, cmp)
+                            }
+                            KIND_NUMBER => {
+                                cmp_f64(f64::from_bits(self.stack.at(idx).bits()), imm as f64, cmp)
+                            }
                             _ => compare_values(&self.slot_value(idx), &Value::int(imm), cmp),
                         }
                     } else {
@@ -2197,8 +2204,16 @@ impl Vm {
                             _ => compare_values(&self.slot_value(ia), &self.slot_value(ib), cmp),
                         }
                     } else {
-                        let va = if ia < self.stack.len() { self.slot_value(ia) } else { Value::undefined() };
-                        let vb = if ib < self.stack.len() { self.slot_value(ib) } else { Value::undefined() };
+                        let va = if ia < self.stack.len() {
+                            self.slot_value(ia)
+                        } else {
+                            Value::undefined()
+                        };
+                        let vb = if ib < self.stack.len() {
+                            self.slot_value(ib)
+                        } else {
+                            Value::undefined()
+                        };
                         compare_values(&va, &vb, cmp)
                     };
                     if result {
@@ -2244,9 +2259,11 @@ impl Vm {
                     } else {
                         Value::undefined()
                     };
-                    let result = compare_values(&v, &k, cmp_semantic(
-                        Opcode::from_u8(cmp).unwrap_or(Opcode::StrictEqual),
-                    ));
+                    let result = compare_values(
+                        &v,
+                        &k,
+                        cmp_semantic(Opcode::from_u8(cmp).unwrap_or(Opcode::StrictEqual)),
+                    );
                     if result {
                         pc += 9;
                     } else {
@@ -2382,7 +2399,10 @@ impl Vm {
                     pc += 10;
                 }
 
-                Opcode::Pop => { self.pop(); pc += 1; }
+                Opcode::Pop => {
+                    self.pop();
+                    pc += 1;
+                }
                 Opcode::Dup => {
                     let val = self.peek();
                     self.push(val);
@@ -2432,8 +2452,13 @@ impl Vm {
                     pc += 5;
                 }
 
-                Opcode::Send => { pc += 1; }
-                Opcode::Receive => { self.push(Value::undefined()); pc += 1; }
+                Opcode::Send => {
+                    pc += 1;
+                }
+                Opcode::Receive => {
+                    self.push(Value::undefined());
+                    pc += 1;
+                }
                 Opcode::Spawn => {
                     // Pop a function and push a promise that resolves with its
                     // result: the task runs as its own isolated frame on the
@@ -2747,18 +2772,20 @@ impl Vm {
                     rebased_frame.handlers_len = 0;
                     rebased_frame.this_slot = None;
 
-                    let state = std::rc::Rc::new(std::cell::RefCell::new(crate::vm::generator::GeneratorState {
-                        stack: gen_stack,
-                        call_stack: vec![rebased_frame],
-                        cells_stack: gen_cells,
-                        handlers: gen_handlers,
-                        pc: pc + 1,
-                        program_id: self.program_id,
-                        done: false,
-                        yielded: false,
-                        is_initial: true,
-                        return_value: Value::undefined(),
-                    }));
+                    let state = std::rc::Rc::new(std::cell::RefCell::new(
+                        crate::vm::generator::GeneratorState {
+                            stack: gen_stack,
+                            call_stack: vec![rebased_frame],
+                            cells_stack: gen_cells,
+                            handlers: gen_handlers,
+                            pc: pc + 1,
+                            program_id: self.program_id,
+                            done: false,
+                            yielded: false,
+                            is_initial: true,
+                            return_value: Value::undefined(),
+                        },
+                    ));
 
                     self.generators.insert(gen_id, state);
 
@@ -2883,8 +2910,16 @@ impl Vm {
                             _ => compare_values(&self.slot_value(ia), &self.slot_value(ib), cmp),
                         }
                     } else {
-                        let va = if ia < self.stack.len() { self.slot_value(ia) } else { Value::undefined() };
-                        let vb = if ib < self.stack.len() { self.slot_value(ib) } else { Value::undefined() };
+                        let va = if ia < self.stack.len() {
+                            self.slot_value(ia)
+                        } else {
+                            Value::undefined()
+                        };
+                        let vb = if ib < self.stack.len() {
+                            self.slot_value(ib)
+                        } else {
+                            Value::undefined()
+                        };
                         compare_values(&va, &vb, cmp)
                     };
                     if result {
@@ -2923,9 +2958,7 @@ impl Vm {
         };
 
         let base = self.call_stack.last().map(|f| f.base_slot).unwrap_or(0);
-        let slots_ptr = unsafe {
-            self.stack.slots.as_mut_ptr().add(base) as *mut u64
-        };
+        let slots_ptr = unsafe { self.stack.slots.as_mut_ptr().add(base) as *mut u64 };
         let slots_len = self.stack.slots.len().saturating_sub(base) as u64;
         let max_trips = 100_000u64;
 
@@ -3006,7 +3039,11 @@ impl Vm {
             let cb = callee.bits();
             let ic_hit = self.call_ic[site].callee_bits == cb;
             if !ic_hit {
-                self.call_ic[site] = CallIcEntry { callee_bits: cb, func_ptr: f.ptr as u64, params: f.params };
+                self.call_ic[site] = CallIcEntry {
+                    callee_bits: cb,
+                    func_ptr: f.ptr as u64,
+                    params: f.params,
+                };
             }
             // Missing arguments read as `undefined`, never as stale stack
             // garbage from an earlier frame (`function f(x, y)` called with
@@ -3025,7 +3062,11 @@ impl Vm {
             // functions that reference it (the body's local stores would
             // otherwise clobber the arg slots before a lazy read).
             let arg_values = if f.uses_args != 0 {
-                Some((0..argc).map(|i| self.stack.at(base_slot + i).clone()).collect())
+                Some(
+                    (0..argc)
+                        .map(|i| self.stack.at(base_slot + i).clone())
+                        .collect(),
+                )
             } else {
                 None
             };
@@ -3055,7 +3096,8 @@ impl Vm {
             if f.program != self.program_id {
                 self.load_program(f.program);
             }
-            f.ptr        } else if let Some(f) = callee.as_native() {
+            f.ptr
+        } else if let Some(f) = callee.as_native() {
             let mut args: Vec<Value> = (0..argc).map(|_| self.pop()).collect();
             args.reverse();
             // Method natives (Map/Set methods on the prototype) read their
@@ -3249,11 +3291,7 @@ impl Vm {
         // (class getters on the instance's own accessor table). An accessor
         // with no callable getter reads as undefined — it does NOT fall
         // through to the prototype chain.
-        if let Some((g, _)) = od
-            .accessors
-            .as_ref()
-            .and_then(|accs| accs.get(name))
-        {
+        if let Some((g, _)) = od.accessors.as_ref().and_then(|accs| accs.get(name)) {
             let (g, receiver) = (g.clone(), receiver.clone());
             drop(od);
             if g.is_function() || g.is_native() {
@@ -3341,7 +3379,11 @@ impl Vm {
             };
             if let Some(t) = trap {
                 if t.is_function() || t.is_native() {
-                    return self.call_value_with_this(&t, Some(handler), &[target, prop.clone(), obj.clone()]);
+                    return self.call_value_with_this(
+                        &t,
+                        Some(handler),
+                        &[target, prop.clone(), obj.clone()],
+                    );
                 }
             }
             return if prop.is_symbol() || prop.is_number() || prop.is_int() {
@@ -3382,9 +3424,10 @@ impl Vm {
                     let this_arg = args.first().cloned().unwrap_or(Value::undefined());
                     let rest: Vec<Value> = if is_apply {
                         match args.get(1) {
-                            Some(a) if a.is_array() => {
-                                a.as_array().map(|ad| ad.borrow().to_values()).unwrap_or_default()
-                            }
+                            Some(a) if a.is_array() => a
+                                .as_array()
+                                .map(|ad| ad.borrow().to_values())
+                                .unwrap_or_default(),
                             // Node: non-array -> TypeError; the engine's
                             // non-throwing style coerces to no args.
                             _ => Vec::new(),
@@ -3400,7 +3443,12 @@ impl Vm {
             // `fn.length` (declared fixed-param count, like V8) falls back
             // here when no static prop shadows it — arity sniffing for
             // Express-style 4-arg error middleware depends on it.
-            if let Some(v) = f.props.borrow().as_ref().and_then(|p| p.borrow().get(s).cloned()) {
+            if let Some(v) = f
+                .props
+                .borrow()
+                .as_ref()
+                .and_then(|p| p.borrow().get(s).cloned())
+            {
                 return v;
             }
             if s == "length" {
@@ -3423,7 +3471,11 @@ impl Vm {
         } else if let (Some(arr), Some(n)) = (obj.as_array(), prop.as_number()) {
             let arr = arr.borrow();
             let i = n as usize;
-            if i < arr.len() { arr.get(i) } else { Value::undefined() }
+            if i < arr.len() {
+                arr.get(i)
+            } else {
+                Value::undefined()
+            }
         } else if let (Some(_), Some(s)) = (obj.as_array(), prop.as_str()) {
             array_prop(obj, s)
         } else if let (Some(_), Some(s)) = (obj.as_regex(), prop.as_str()) {
@@ -3484,10 +3536,7 @@ impl Vm {
                                 // (it decodes into its own heap and wakes);
                                 // otherwise decode here and resolve locally.
                                 let owner = waiter.as_promise().and_then(|p| {
-                                    p.lock()
-                                        .unwrap_or_else(|g| g.into_inner())
-                                        .owner
-                                        .clone()
+                                    p.lock().unwrap_or_else(|g| g.into_inner()).owner.clone()
                                 });
                                 let mine = vm.wake_handle();
                                 let mine_here = match (&owner, &mine) {
@@ -3509,10 +3558,7 @@ impl Vm {
                                 // somehow belongs to another loop, serialize
                                 // and route (raw values cannot cross heaps).
                                 let owner = waiter.as_promise().and_then(|p| {
-                                    p.lock()
-                                        .unwrap_or_else(|g| g.into_inner())
-                                        .owner
-                                        .clone()
+                                    p.lock().unwrap_or_else(|g| g.into_inner()).owner.clone()
                                 });
                                 let mine = vm.wake_handle();
                                 let mine_here = match (&owner, &mine) {
@@ -3625,7 +3671,11 @@ impl Vm {
             };
             if let Some(t) = trap {
                 if t.is_function() || t.is_native() {
-                    self.call_value_with_this(&t, Some(handler), &[target, prop.clone(), val, obj.clone()]);
+                    self.call_value_with_this(
+                        &t,
+                        Some(handler),
+                        &[target, prop.clone(), val, obj.clone()],
+                    );
                     return;
                 }
             }
@@ -3665,14 +3715,12 @@ impl Vm {
             // `C.sm = fn`. Lazy-allocate the props map on first write via
             // the outer RefCell (the function lives behind a shared Rc).
             let mut slot = f.props.borrow_mut();
-            let map = slot
-                .get_or_insert_with(|| Rc::new(RefCell::new(hashbrown::HashMap::new())));
+            let map = slot.get_or_insert_with(|| Rc::new(RefCell::new(hashbrown::HashMap::new())));
             map.borrow_mut().insert(s.to_string(), val);
         } else if let (Some(props), Some(s)) = (obj.as_native_props(), prop.as_str()) {
             // Same for natives with statics (`String.x = ...`).
             let mut slot = props.borrow_mut();
-            let map = slot
-                .get_or_insert_with(|| Rc::new(RefCell::new(hashbrown::HashMap::new())));
+            let map = slot.get_or_insert_with(|| Rc::new(RefCell::new(hashbrown::HashMap::new())));
             map.borrow_mut().insert(s.to_string(), val);
         }
     }
@@ -3710,9 +3758,7 @@ impl Vm {
                                 Value::object(obj)
                             }
                         }));
-                        let iter_fn = Value::native(Arc::new(|_args, vm| {
-                            vm.this_value()
-                        }));
+                        let iter_fn = Value::native(Arc::new(|_args, vm| vm.this_value()));
                         let mut props = hashbrown::HashMap::new();
                         props.insert("next".to_string(), next_fn);
                         props.insert(format!("\0sym_{}", SYMBOL_ITERATOR), iter_fn);
@@ -3744,9 +3790,7 @@ impl Vm {
                                 Value::object(obj)
                             }
                         }));
-                        let iter_fn = Value::native(Arc::new(|_args, vm| {
-                            vm.this_value()
-                        }));
+                        let iter_fn = Value::native(Arc::new(|_args, vm| vm.this_value()));
                         let mut props = hashbrown::HashMap::new();
                         props.insert("next".to_string(), next_fn);
                         props.insert(format!("\0sym_{}", SYMBOL_ITERATOR), iter_fn);
@@ -3764,7 +3808,11 @@ impl Vm {
             if i.is_finite() && i >= 0.0 {
                 let arr = arr.borrow();
                 let ix = i as usize;
-                if ix < arr.len() { arr.get(ix) } else { Value::undefined() }
+                if ix < arr.len() {
+                    arr.get(ix)
+                } else {
+                    Value::undefined()
+                }
             } else {
                 Value::undefined()
             }
@@ -3825,7 +3873,9 @@ impl Vm {
             let mut m = m.borrow_mut();
             match idx.as_str() {
                 // Borrow the key from the index Value — no per-access alloc.
-                Some(key) => { m.set(key, val); }
+                Some(key) => {
+                    m.set(key, val);
+                }
                 None => {
                     if let Some(id) = idx.as_symbol() {
                         let key = format!("\0sym_{}", id);

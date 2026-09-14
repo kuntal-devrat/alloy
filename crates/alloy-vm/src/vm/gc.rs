@@ -1,11 +1,11 @@
-use std::cell::RefCell;
-use alloy_core::heap::{KIND_ARRAY, KIND_OBJECT, PromoteMap};
+use alloy_core::heap::{PromoteMap, KIND_ARRAY, KIND_OBJECT};
 use alloy_core::value::{
-    ArrayData, ChannelItem, MarkState, ObjectData, PromiseStatus, RcDirtyRef, Value,
-    sweep_old_mark_sweep, sweep_young, walk_cell, walk_container_entries, walk_value,
+    sweep_old_mark_sweep, sweep_young, walk_cell, walk_container_entries, walk_value, ArrayData,
+    ChannelItem, MarkState, ObjectData, PromiseStatus, RcDirtyRef, Value,
 };
+use std::cell::RefCell;
 
-use super::core::{MAJOR_THRESHOLD_MAX, MAJOR_THRESHOLD_MIN, Vm};
+use super::core::{Vm, MAJOR_THRESHOLD_MAX, MAJOR_THRESHOLD_MIN};
 use super::ops_async::{Continuation, Microtask};
 
 impl Vm {
@@ -17,7 +17,13 @@ impl Vm {
         result: Option<&mut Value>,
     ) {
         for i in 0..self.stack.sp {
-            walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), &mut self.stack.slots[i]);
+            walk_value(
+                &mut self.heap,
+                map,
+                visited,
+                mark.as_deref_mut(),
+                &mut self.stack.slots[i],
+            );
         }
         for g in &mut self.globals {
             walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), g);
@@ -45,7 +51,13 @@ impl Vm {
             walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), w);
         }
         for t in &mut self.timers {
-            walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), &mut t.callback);
+            walk_value(
+                &mut self.heap,
+                map,
+                visited,
+                mark.as_deref_mut(),
+                &mut t.callback,
+            );
         }
         for cont in self.continuations.values_mut() {
             match cont {
@@ -59,7 +71,11 @@ impl Vm {
                         }
                     }
                 }
-                Continuation::Callback { callback, on_rejected, promise } => {
+                Continuation::Callback {
+                    callback,
+                    on_rejected,
+                    promise,
+                } => {
                     if let Some(cb) = callback.as_mut() {
                         walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), cb);
                     }
@@ -78,7 +94,13 @@ impl Vm {
         let mts: Vec<usize> = self.microtasks.iter().copied().collect();
         for addr in mts {
             let mut mt = unsafe { self.microtask_arena.read_at(addr as *const Microtask) };
-            walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), &mut mt.value);
+            walk_value(
+                &mut self.heap,
+                map,
+                visited,
+                mark.as_deref_mut(),
+                &mut mt.value,
+            );
             unsafe {
                 std::ptr::write(addr as *mut Microtask, mt);
             }
@@ -91,7 +113,10 @@ impl Vm {
     pub(crate) fn promote_and_reclaim(&mut self, result: Option<&mut Value>) {
         let mut mark = self.mark.take();
         if mark.is_none()
-            && self.heap.old_alloc_total().saturating_sub(self.last_major_alloc)
+            && self
+                .heap
+                .old_alloc_total()
+                .saturating_sub(self.last_major_alloc)
                 >= self.major_threshold
         {
             mark = Some(MarkState::new());
@@ -169,7 +194,13 @@ impl Vm {
                         walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), e);
                     }
                     if let Some(cd) = od.entries.as_mut() {
-                        walk_container_entries(cd, &mut self.heap, map, visited, mark.as_deref_mut());
+                        walk_container_entries(
+                            cd,
+                            &mut self.heap,
+                            map,
+                            visited,
+                            mark.as_deref_mut(),
+                        );
                     }
                 }
                 _ => {}
@@ -200,7 +231,13 @@ impl Vm {
             KIND_OBJECT => {
                 let inner = unsafe { &*(addr as *const RefCell<ObjectData>) };
                 let mut od = inner.borrow_mut();
-                walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), &mut od.proto);
+                walk_value(
+                    &mut self.heap,
+                    map,
+                    visited,
+                    mark.as_deref_mut(),
+                    &mut od.proto,
+                );
                 for e in od.values.iter_mut() {
                     walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), e);
                 }
@@ -221,7 +258,13 @@ impl Vm {
     ) {
         match d {
             RcDirtyRef::Cell(cell) => {
-                walk_value(&mut self.heap, map, visited, mark.as_deref_mut(), &mut cell.borrow_mut());
+                walk_value(
+                    &mut self.heap,
+                    map,
+                    visited,
+                    mark.as_deref_mut(),
+                    &mut cell.borrow_mut(),
+                );
             }
             RcDirtyRef::Promise(p) => {
                 let mut ps = p.lock().unwrap_or_else(|g| g.into_inner());

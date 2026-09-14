@@ -13,7 +13,7 @@ http.createServer(async (req, res) => {
     if (req.path === '/health' || (req.method === 'GET' && req.path === '/api/health')) {
         const pyHealth = JSON.parse(await python.health());
         return res.json({
-            gateway: "alloy-v0.1.0",
+            gateway: "alloy-v0.2.0",
             status: "online",
             python_engine: pyHealth
         });

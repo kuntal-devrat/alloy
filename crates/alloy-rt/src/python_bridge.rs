@@ -14,7 +14,13 @@ pub struct PythonBridge {
 impl PythonBridge {
     pub fn new() -> Self {
         Self {
-            python_path: std::env::var("ALLOY_PYTHON").unwrap_or_else(|_| if cfg!(windows) { "python".to_string() } else { "python3".to_string() }),
+            python_path: std::env::var("ALLOY_PYTHON").unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    "python".to_string()
+                } else {
+                    "python3".to_string()
+                }
+            }),
             timeout: Duration::from_secs(10),
         }
     }
@@ -26,7 +32,10 @@ impl PythonBridge {
         }
     }
 
-    pub fn with_timeout(mut self, t: Duration) -> Self { self.timeout = t; self }
+    pub fn with_timeout(mut self, t: Duration) -> Self {
+        self.timeout = t;
+        self
+    }
 
     fn run(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
         // Basic injection guard: reject args containing null bytes

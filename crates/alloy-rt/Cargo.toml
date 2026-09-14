@@ -15,8 +15,8 @@ description = "Event loop, actor runtime, asynchronous task scheduling, and I/O 
 workspace = true
 
 [dependencies]
-alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.1.0" }
-alloy-vm = { path = "../alloy-vm", version = "0.1.0" }
+alloy-core = { package = "alloy-runtime-core", path = "../alloy-core", version = "0.2.0" }
+alloy-vm = { path = "../alloy-vm", version = "0.2.0" }
 tokio.workspace = true
 libc.workspace = true
 

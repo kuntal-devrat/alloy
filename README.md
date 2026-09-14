@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/alloy-runtime/alloy/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg" alt="CI Status" /></a>
-  <a href="https://crates.io/crates/alloy-cli"><img src="https://img.shields.io/badge/crates.io-v0.1.0-orange.svg" alt="Crates.io" /></a>
+  <a href="https://crates.io/crates/alloy-cli"><img src="https://img.shields.io/badge/crates.io-v0.2.0-orange.svg" alt="Crates.io" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
 </p>
 

@@ -12,36 +12,50 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("alloy runtime v0.1.0");
-        eprintln!("Usage: alloy <script.ajs|script.js|script.ax>");
-        eprintln!("       alloy init [dir]");
-        eprintln!("       alloy add <pkg>");
-        eprintln!("       alloy install");
-        eprintln!("       alloy test [filter]");
-        eprintln!("       alloy lsp");
-        eprintln!("       alloy --bench <script.ajs>");
-        eprintln!("       alloy --disasm <script.ajs|script.js|script.ax>");
-        eprintln!("       alloy --emit-ax <script.ajs> <out.ax>");
+        run_repl();
         return;
     }
 
     match args[1].as_str() {
+        "-e" | "--eval" => {
+            if args.len() < 3 {
+                eprintln!("Usage: alloy -e <code_string>");
+                std::process::exit(1);
+            }
+            let code = &args[2];
+            let program = match Compiler::compile_source(code) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("compile error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let mut vm = Vm::new(program);
+            vm.run();
+            if let Some(err) = vm.take_error() {
+                eprintln!("uncaught exception: {}", err);
+                std::process::exit(1);
+            }
+        }
         "--version" | "-v" => {
-            println!("alloy 0.1.0");
+            println!("alloy 0.2.0");
         }
         "--help" | "-h" => {
             println!("alloy - A hyper-optimized polyglot systems runtime");
             println!();
             println!("Usage:");
-            println!("  alloy <script.ajs>           Execute an alloy source file (.ajs is");
-            println!("                                the native extension; plain .js is also");
-            println!("                                accepted for compatibility)");
+            println!("  alloy                         Start the interactive REPL");
+            println!("  alloy <script.ajs|script.js>   Execute an alloy source file");
             println!("  alloy <script.ax>             Execute precompiled bytecode");
+            println!("  alloy -e <code>               Evaluate inline JavaScript");
+            println!("  alloy repl                    Start the interactive REPL");
             println!("  alloy init [dir]              Initialize a new Alloy project");
             println!("  alloy add <pkg>               Add an npm dependency to project");
             println!("  alloy install                 Install dependencies from alloy.json");
             println!("  alloy test [filter]           Run test suite (*.test.ajs / *.test.js)");
-            println!("  alloy lsp                     Start the Language Server (JSON-RPC over stdio)");
+            println!(
+                "  alloy lsp                     Start the Language Server (JSON-RPC over stdio)"
+            );
             println!("  alloy --emit-ax <in> <out>    Compile source to .ax bytecode");
             println!("  alloy --bench <script.ajs>    Benchmark execution");
             println!("  alloy --disasm <file>         Disassemble source or bytecode");
@@ -173,7 +187,11 @@ fn run_file(path: &str) {
     let result = vm.run();
     if let Some(err) = vm.take_error() {
         if let Some(od) = err.as_object() {
-            if let Some(st) = od.borrow().get("stack").and_then(|s| s.as_str().map(|x| x.to_string())) {
+            if let Some(st) = od
+                .borrow()
+                .get("stack")
+                .and_then(|s| s.as_str().map(|x| x.to_string()))
+            {
                 eprintln!("{}", st);
                 std::process::exit(1);
             }
@@ -184,7 +202,10 @@ fn run_file(path: &str) {
 
     let total = start.elapsed();
     if env::var("ALLOY_TRACE").is_ok() {
-        eprintln!("compile: {:?} | total: {:?} | result: {}", compile_time, total, result);
+        eprintln!(
+            "compile: {:?} | total: {:?} | result: {}",
+            compile_time, total, result
+        );
     }
 }
 
@@ -259,7 +280,10 @@ fn bench_file(path: &str) {
     println!("  compile:     {:?}", compile_time);
     println!("  total exec:  {:?}", exec_time);
     println!("  per exec:    {:?}", exec_time / iterations);
-    println!("  execs/sec:   {:.0}", iterations as f64 / exec_time.as_secs_f64());
+    println!(
+        "  execs/sec:   {:.0}",
+        iterations as f64 / exec_time.as_secs_f64()
+    );
 }
 
 fn disasm_file(path: &str) {
@@ -268,7 +292,9 @@ fn disasm_file(path: &str) {
     println!("=== Raw Bytecode ===");
     for (i, b) in program.bytecode.iter().enumerate() {
         print!("{:02x} ", b);
-        if (i + 1) % 16 == 0 { println!(); }
+        if (i + 1) % 16 == 0 {
+            println!();
+        }
     }
     println!();
     println!("=== Constants ===");
@@ -283,7 +309,7 @@ fn disasm_file(path: &str) {
 fn run_repl() {
     use std::io::{self, Write};
 
-    println!("alloy REPL v0.1.0");
+    println!("alloy REPL v0.2.0");
     println!("Type 'exit' to quit, 'help' for commands");
     println!();
 

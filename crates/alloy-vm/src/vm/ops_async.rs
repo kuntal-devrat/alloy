@@ -1,8 +1,8 @@
+use crate::vm::stack::CallFrame;
+use alloy_core::value::{PromiseState, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use alloy_core::value::{PromiseState, Value};
-use crate::vm::stack::CallFrame;
 
 #[derive(Clone)]
 pub struct Microtask {

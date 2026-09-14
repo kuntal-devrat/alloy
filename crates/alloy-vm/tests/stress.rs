@@ -121,7 +121,10 @@ fn test_stress_heap_and_gc() {
     let out = run_output(src);
     let elapsed = start.elapsed();
     assert_eq!(out, "ALLOC_COUNT:1200000");
-    println!("Allocated 1,200,000 objects/arrays/strings in {:?}", elapsed);
+    println!(
+        "Allocated 1,200,000 objects/arrays/strings in {:?}",
+        elapsed
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +176,10 @@ fn test_stress_http_server_concurrent() {
                 };
 
                 let req = if r % 2 == 0 {
-                    format!("GET /test_{}_{} HTTP/1.1\r\nHost: localhost\r\n\r\n", client_id, r)
+                    format!(
+                        "GET /test_{}_{} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                        client_id, r
+                    )
                 } else {
                     let body = format!("{{\"client\":{},\"seq\":{}}}", client_id, r);
                     format!(
@@ -275,5 +281,8 @@ fn test_stress_jit_and_hot_loops() {
     let out = run_output(src);
     let elapsed = start.elapsed();
     assert_eq!(out, "PRIMES:5133 FIB:6765");
-    println!("Sieve (50,000) and 100,000 Fib passes completed in {:?}", elapsed);
+    println!(
+        "Sieve (50,000) and 100,000 Fib passes completed in {:?}",
+        elapsed
+    );
 }

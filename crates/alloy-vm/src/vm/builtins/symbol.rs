@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use alloy_core::value::{
     symbol_description, symbol_for, symbol_key_for, symbol_new, NativeFn, Value,
-    SYMBOL_ASYNC_ITERATOR, SYMBOL_HAS_INSTANCE, SYMBOL_IS_CONCAT_SPREADABLE,
-    SYMBOL_ITERATOR, SYMBOL_SPECIES, SYMBOL_TO_PRIMITIVE, SYMBOL_TO_STRING_TAG,
+    SYMBOL_ASYNC_ITERATOR, SYMBOL_HAS_INSTANCE, SYMBOL_IS_CONCAT_SPREADABLE, SYMBOL_ITERATOR,
+    SYMBOL_SPECIES, SYMBOL_TO_PRIMITIVE, SYMBOL_TO_STRING_TAG,
 };
+use std::sync::Arc;
 
 pub(crate) fn make_symbol_ctor() -> Value {
     // Prototype object for Symbol instances / values
@@ -15,7 +15,9 @@ pub(crate) fn make_symbol_ctor() -> Value {
                 None => Value::string("Symbol()".to_string()),
             }
         } else {
-            vm.throw_exception(Value::string("TypeError: Symbol.prototype.toString requires that 'this' be a Symbol".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Symbol.prototype.toString requires that 'this' be a Symbol".to_string(),
+            ));
             Value::undefined()
         }
     }));
@@ -25,7 +27,9 @@ pub(crate) fn make_symbol_ctor() -> Value {
         if th.is_symbol() {
             th
         } else {
-            vm.throw_exception(Value::string("TypeError: Symbol.prototype.valueOf requires that 'this' be a Symbol".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Symbol.prototype.valueOf requires that 'this' be a Symbol".to_string(),
+            ));
             Value::undefined()
         }
     }));
@@ -45,7 +49,9 @@ pub(crate) fn make_symbol_ctor() -> Value {
     let key_for_fn = Value::native(Arc::new(|args, vm| {
         let sym = args.first().cloned().unwrap_or(Value::undefined());
         if !sym.is_symbol() {
-            vm.throw_exception(Value::string("TypeError: Symbol.keyFor requires that argument be a symbol".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Symbol.keyFor requires that argument be a symbol".to_string(),
+            ));
             return Value::undefined();
         }
         match symbol_key_for(&sym) {
@@ -57,16 +63,14 @@ pub(crate) fn make_symbol_ctor() -> Value {
     let ctor_fn: NativeFn = Arc::new(|args, vm| {
         // Calling with `new` is disallowed in JS
         if vm.this_value().is_object() {
-            vm.throw_exception(Value::string("TypeError: Symbol is not a constructor".to_string()));
+            vm.throw_exception(Value::string(
+                "TypeError: Symbol is not a constructor".to_string(),
+            ));
             return Value::undefined();
         }
-        let desc = args.first().and_then(|v| {
-            if v.is_undefined() {
-                None
-            } else {
-                v.as_str()
-            }
-        });
+        let desc = args
+            .first()
+            .and_then(|v| if v.is_undefined() { None } else { v.as_str() });
         symbol_new(desc)
     });
 
@@ -74,12 +78,27 @@ pub(crate) fn make_symbol_ctor() -> Value {
         ("for".to_string(), for_fn),
         ("keyFor".to_string(), key_for_fn),
         ("iterator".to_string(), Value::symbol(SYMBOL_ITERATOR)),
-        ("toStringTag".to_string(), Value::symbol(SYMBOL_TO_STRING_TAG)),
-        ("hasInstance".to_string(), Value::symbol(SYMBOL_HAS_INSTANCE)),
-        ("toPrimitive".to_string(), Value::symbol(SYMBOL_TO_PRIMITIVE)),
-        ("isConcatSpreadable".to_string(), Value::symbol(SYMBOL_IS_CONCAT_SPREADABLE)),
+        (
+            "toStringTag".to_string(),
+            Value::symbol(SYMBOL_TO_STRING_TAG),
+        ),
+        (
+            "hasInstance".to_string(),
+            Value::symbol(SYMBOL_HAS_INSTANCE),
+        ),
+        (
+            "toPrimitive".to_string(),
+            Value::symbol(SYMBOL_TO_PRIMITIVE),
+        ),
+        (
+            "isConcatSpreadable".to_string(),
+            Value::symbol(SYMBOL_IS_CONCAT_SPREADABLE),
+        ),
         ("species".to_string(), Value::symbol(SYMBOL_SPECIES)),
-        ("asyncIterator".to_string(), Value::symbol(SYMBOL_ASYNC_ITERATOR)),
+        (
+            "asyncIterator".to_string(),
+            Value::symbol(SYMBOL_ASYNC_ITERATOR),
+        ),
     ];
 
     Value::native_with_props(ctor_fn, proto, statics)

@@ -13,7 +13,7 @@ Runtime event loop, actor concurrency, and asynchronous I/O engine for [Alloy](h
 
 ```toml
 [dependencies]
-alloy-rt = "0.1.0"
+alloy-rt = "0.2.0"
 ```
 
 ## License

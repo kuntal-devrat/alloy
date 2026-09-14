@@ -24,4 +24,3 @@ pub mod fuzz {
     pub use super::builtins::web::dechunk;
     pub use super::spawn::decode_spawn_value;
 }
-

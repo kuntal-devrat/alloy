@@ -1,5 +1,5 @@
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MachMemFlags};
 use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MachMemFlags};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -7,9 +7,9 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 use hashbrown::{HashMap, HashSet};
 
+use super::JitLoopFn;
 use crate::bytecode::Program;
 use crate::opcode::Opcode;
-use super::JitLoopFn;
 
 pub struct JitCompiler {
     module: JITModule,
@@ -21,13 +21,20 @@ pub struct JitCompiler {
 impl JitCompiler {
     pub fn new() -> Result<Self, String> {
         let mut flag_builder = settings::builder();
-        flag_builder.set("use_colocated_libcalls", "false").map_err(|e| e.to_string())?;
-        flag_builder.set("is_pic", "false").map_err(|e| e.to_string())?;
-        flag_builder.set("opt_level", "speed").map_err(|e| e.to_string())?;
+        flag_builder
+            .set("use_colocated_libcalls", "false")
+            .map_err(|e| e.to_string())?;
+        flag_builder
+            .set("is_pic", "false")
+            .map_err(|e| e.to_string())?;
+        flag_builder
+            .set("opt_level", "speed")
+            .map_err(|e| e.to_string())?;
 
         let isa_builder = cranelift_native::builder()
             .map_err(|e| format!("host target not supported by cranelift: {e}"))?;
-        let isa = isa_builder.finish(settings::Flags::new(flag_builder))
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
             .map_err(|e| format!("failed to create isa: {e}"))?;
 
         let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
@@ -52,7 +59,12 @@ impl JitCompiler {
         let bc = &program.bytecode;
         if header_pc >= backedge_pc || backedge_pc >= bc.len() {
             if std::env::var("ALLOY_JIT_LOG").is_ok() {
-                eprintln!("[compile_loop] invalid pcs: header={} backedge={} len={}", header_pc, backedge_pc, bc.len());
+                eprintln!(
+                    "[compile_loop] invalid pcs: header={} backedge={} len={}",
+                    header_pc,
+                    backedge_pc,
+                    bc.len()
+                );
             }
             return None;
         }
@@ -79,7 +91,9 @@ impl JitCompiler {
                     pc += 1;
                 }
                 Opcode::StoreLocalLocal => {
-                    if pc + 3 > bc.len() { return None; }
+                    if pc + 3 > bc.len() {
+                        return None;
+                    }
                     let dst = bc[pc + 1] as usize;
                     let src = bc[pc + 2] as usize;
                     slots_used.insert(dst);
@@ -87,17 +101,25 @@ impl JitCompiler {
                     pc += 3;
                 }
                 Opcode::IncLocal => {
-                    if pc + 4 > bc.len() { return None; }
+                    if pc + 4 > bc.len() {
+                        return None;
+                    }
                     let flags = bc[pc + 2];
-                    if flags & 2 != 0 { return None; } // operand stack push not supported in JIT
+                    if flags & 2 != 0 {
+                        return None;
+                    } // operand stack push not supported in JIT
                     let slot = bc[pc + 1] as usize;
                     slots_used.insert(slot);
                     pc += 4;
                 }
                 Opcode::AppendStringLocal => {
-                    if pc + 4 > bc.len() { return None; }
+                    if pc + 4 > bc.len() {
+                        return None;
+                    }
                     let keep = bc[pc + 3];
-                    if keep != 0 { return None; }
+                    if keep != 0 {
+                        return None;
+                    }
                     let slot = bc[pc + 1] as usize;
                     let src = bc[pc + 2] as usize;
                     slots_used.insert(slot);
@@ -105,39 +127,55 @@ impl JitCompiler {
                     pc += 4;
                 }
                 Opcode::BinLocalLocalLocalArith => {
-                    if pc + 5 > bc.len() { return None; }
+                    if pc + 5 > bc.len() {
+                        return None;
+                    }
                     let dst = bc[pc + 1] as usize;
                     let src1 = bc[pc + 2] as usize;
                     let src2 = bc[pc + 3] as usize;
                     let ar = bc[pc + 4];
-                    if ar > 10 { return None; } // Only supported basic arith/bitwise
+                    if ar > 10 {
+                        return None;
+                    } // Only supported basic arith/bitwise
                     slots_used.insert(dst);
                     slots_used.insert(src1);
                     slots_used.insert(src2);
                     pc += 5;
                 }
                 Opcode::BinLocalLocalLocalInt => {
-                    if pc + 8 > bc.len() { return None; }
+                    if pc + 8 > bc.len() {
+                        return None;
+                    }
                     let dst = bc[pc + 1] as usize;
                     let src = bc[pc + 2] as usize;
                     let ar = bc[pc + 3];
-                    if ar > 10 { return None; }
+                    if ar > 10 {
+                        return None;
+                    }
                     slots_used.insert(dst);
                     slots_used.insert(src);
                     pc += 8;
                 }
                 Opcode::Arith2StoreLocalConst => {
-                    if pc + 7 > bc.len() { return None; }
+                    if pc + 7 > bc.len() {
+                        return None;
+                    }
                     let ar_byte = bc[pc + 2];
-                    if ar_byte & 0x80 != 0 { return None; } // keep pushes to stack
+                    if ar_byte & 0x80 != 0 {
+                        return None;
+                    } // keep pushes to stack
                     let slot = bc[pc + 1] as usize;
                     let ar = ar_byte & 0x7F;
-                    if ar > 10 { return None; }
+                    if ar > 10 {
+                        return None;
+                    }
                     slots_used.insert(slot);
                     pc += 7;
                 }
                 Opcode::CmpLocalIntJumpIfFalsePop => {
-                    if pc + 11 > bc.len() { return None; }
+                    if pc + 11 > bc.len() {
+                        return None;
+                    }
                     let slot = bc[pc + 1] as usize;
                     let target = read_u32(bc, pc + 7) as usize;
                     slots_used.insert(slot);
@@ -147,7 +185,9 @@ impl JitCompiler {
                     pc += 11;
                 }
                 Opcode::CmpLocalLocalJumpIfFalsePop | Opcode::CmpLocalLocalJumpIfFalse => {
-                    if pc + 8 > bc.len() { return None; }
+                    if pc + 8 > bc.len() {
+                        return None;
+                    }
                     let s1 = bc[pc + 1] as usize;
                     let s2 = bc[pc + 2] as usize;
                     let target = read_u32(bc, pc + 4) as usize;
@@ -159,7 +199,9 @@ impl JitCompiler {
                     pc += 8;
                 }
                 Opcode::Jump => {
-                    if pc + 5 > bc.len() { return None; }
+                    if pc + 5 > bc.len() {
+                        return None;
+                    }
                     let target = read_u32(bc, pc + 1) as usize;
                     if target < header_pc || target > backedge_pc {
                         exit_targets.insert(target);
@@ -182,10 +224,26 @@ impl JitCompiler {
         // Step 2: Build Cranelift IR
         self.ctx.clear();
         self.ctx.func.signature.call_conv = self.module.isa().default_call_conv();
-        self.ctx.func.signature.params.push(AbiParam::new(types::I64)); // slots_ptr
-        self.ctx.func.signature.params.push(AbiParam::new(types::I64)); // slots_len
-        self.ctx.func.signature.params.push(AbiParam::new(types::I64)); // max_trips
-        self.ctx.func.signature.returns.push(AbiParam::new(types::I64)); // resume_pc
+        self.ctx
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(types::I64)); // slots_ptr
+        self.ctx
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(types::I64)); // slots_len
+        self.ctx
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(types::I64)); // max_trips
+        self.ctx
+            .func
+            .signature
+            .returns
+            .push(AbiParam::new(types::I64)); // resume_pc
 
         let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.fn_builder_ctx);
 
@@ -229,23 +287,35 @@ impl JitCompiler {
         // 1. Verify bounds: if max slot >= slots_len, bailout
         let max_slot_needed = sorted_slots.last().copied().unwrap_or(0);
         let max_slot_val = builder.ins().iconst(types::I64, max_slot_needed as i64);
-        let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, max_slot_val, slots_len);
+        let in_bounds = builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, max_slot_val, slots_len);
         let check_types_block = builder.create_block();
-        builder.ins().brif(in_bounds, check_types_block, &[], bailout_block, &[]);
+        builder
+            .ins()
+            .brif(in_bounds, check_types_block, &[], bailout_block, &[]);
 
         // 2. In check_types_block, load each slot, verify it is an INT, and unbox it
         builder.switch_to_block(check_types_block);
-        let tag_mask = builder.ins().iconst(types::I64, 0xFFFF_0000_0000_0000u64 as i64);
-        let tag_int = builder.ins().iconst(types::I64, 0xFFF8_0000_0000_0000u64 as i64);
+        let tag_mask = builder
+            .ins()
+            .iconst(types::I64, 0xFFFF_0000_0000_0000u64 as i64);
+        let tag_int = builder
+            .ins()
+            .iconst(types::I64, 0xFFF8_0000_0000_0000u64 as i64);
 
         for &slot in &sorted_slots {
             let offset = (slot * 8) as i32;
-            let raw_val = builder.ins().load(types::I64, MachMemFlags::new(), slots_ptr, offset);
+            let raw_val = builder
+                .ins()
+                .load(types::I64, MachMemFlags::new(), slots_ptr, offset);
             let tag = builder.ins().band(raw_val, tag_mask);
             let is_int = builder.ins().icmp(IntCC::Equal, tag, tag_int);
 
             let next_block = builder.create_block();
-            builder.ins().brif(is_int, next_block, &[], bailout_block, &[]);
+            builder
+                .ins()
+                .brif(is_int, next_block, &[], bailout_block, &[]);
 
             builder.switch_to_block(next_block);
             // Unbox integer payload: (raw << 16) >> 16
@@ -267,9 +337,14 @@ impl JitCompiler {
             // If this is the header block, increment trips and check max_trips
             if ipc == header_pc {
                 let cur_trips = builder.use_var(trip_var);
-                let hit_limit = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, cur_trips, max_trips);
+                let hit_limit =
+                    builder
+                        .ins()
+                        .icmp(IntCC::SignedGreaterThanOrEqual, cur_trips, max_trips);
                 let loop_cont_block = builder.create_block();
-                builder.ins().brif(hit_limit, yield_block, &[], loop_cont_block, &[]);
+                builder
+                    .ins()
+                    .brif(hit_limit, yield_block, &[], loop_cont_block, &[]);
 
                 builder.switch_to_block(loop_cont_block);
                 let next_trips = builder.ins().iadd_imm_s(cur_trips, 1);
@@ -356,7 +431,9 @@ impl JitCompiler {
 
                     let next_pc = inst_pcs.get(idx + 1).copied().unwrap_or(ipc + 11);
                     let then_blk = block_map[&next_pc];
-                    let else_blk = exit_block_map.get(&target).copied()
+                    let else_blk = exit_block_map
+                        .get(&target)
+                        .copied()
                         .or_else(|| block_map.get(&target).copied())
                         .unwrap_or(bailout_block);
 
@@ -374,7 +451,9 @@ impl JitCompiler {
 
                     let next_pc = inst_pcs.get(idx + 1).copied().unwrap_or(ipc + 8);
                     let then_blk = block_map[&next_pc];
-                    let else_blk = exit_block_map.get(&target).copied()
+                    let else_blk = exit_block_map
+                        .get(&target)
+                        .copied()
                         .or_else(|| block_map.get(&target).copied())
                         .unwrap_or(bailout_block);
 
@@ -397,15 +476,23 @@ impl JitCompiler {
         }
 
         // Helper to write back all variables to slots_ptr
-        let emit_writeback = |builder: &mut FunctionBuilder, sorted_slots: &[usize], var_map: &HashMap<usize, Variable>| {
-            let payload_mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
-            let tag_int = builder.ins().iconst(types::I64, 0xFFF8_0000_0000_0000u64 as i64);
+        let emit_writeback = |builder: &mut FunctionBuilder,
+                              sorted_slots: &[usize],
+                              var_map: &HashMap<usize, Variable>| {
+            let payload_mask = builder
+                .ins()
+                .iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+            let tag_int = builder
+                .ins()
+                .iconst(types::I64, 0xFFF8_0000_0000_0000u64 as i64);
             for &s in sorted_slots {
                 let v = builder.use_var(var_map[&s]);
                 let masked = builder.ins().band(v, payload_mask);
                 let tagged = builder.ins().bor(masked, tag_int);
                 let offset = (s * 8) as i32;
-                builder.ins().store(MachMemFlags::new(), tagged, slots_ptr, offset);
+                builder
+                    .ins()
+                    .store(MachMemFlags::new(), tagged, slots_ptr, offset);
             }
         };
 
@@ -434,15 +521,19 @@ impl JitCompiler {
         // Step 3: Compile function with JITModule
         self.next_fn_id += 1;
         let fn_name = format!("alloy_jit_loop_{}_{}", header_pc, self.next_fn_id);
-        let func_id = match self.module.declare_function(&fn_name, Linkage::Export, &self.ctx.func.signature) {
-            Ok(id) => id,
-            Err(e) => {
-                if std::env::var("ALLOY_JIT_LOG").is_ok() {
-                    eprintln!("[compile_loop] declare_function failed: {}", e);
+        let func_id =
+            match self
+                .module
+                .declare_function(&fn_name, Linkage::Export, &self.ctx.func.signature)
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    if std::env::var("ALLOY_JIT_LOG").is_ok() {
+                        eprintln!("[compile_loop] declare_function failed: {}", e);
+                    }
+                    return None;
                 }
-                return None;
-            }
-        };
+            };
 
         if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
             if std::env::var("ALLOY_JIT_LOG").is_ok() {
@@ -460,14 +551,22 @@ impl JitCompiler {
 
         let code_ptr = self.module.get_finalized_function(func_id);
         if std::env::var("ALLOY_JIT_LOG").is_ok() {
-            eprintln!("[compile_loop] SUCCESS! func_id={:?} code_ptr={:p}", func_id, code_ptr);
+            eprintln!(
+                "[compile_loop] SUCCESS! func_id={:?} code_ptr={:p}",
+                func_id, code_ptr
+            );
         }
         let jit_fn: JitLoopFn = unsafe { std::mem::transmute(code_ptr) };
         Some(jit_fn)
     }
 }
 
-fn emit_arith(builder: &mut FunctionBuilder, ar: u8, v1: cranelift_codegen::ir::Value, v2: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+fn emit_arith(
+    builder: &mut FunctionBuilder,
+    ar: u8,
+    v1: cranelift_codegen::ir::Value,
+    v2: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
     match ar {
         0 => builder.ins().iadd(v1, v2),
         1 => builder.ins().isub(v1, v2),
@@ -484,7 +583,12 @@ fn emit_arith(builder: &mut FunctionBuilder, ar: u8, v1: cranelift_codegen::ir::
     }
 }
 
-fn emit_cmp(builder: &mut FunctionBuilder, cmp: u8, v1: cranelift_codegen::ir::Value, v2: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+fn emit_cmp(
+    builder: &mut FunctionBuilder,
+    cmp: u8,
+    v1: cranelift_codegen::ir::Value,
+    v2: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
     let cc = match cmp {
         0 => IntCC::SignedLessThan,
         1 => IntCC::SignedLessThanOrEqual,

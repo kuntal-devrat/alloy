@@ -56,6 +56,7 @@ def _mock_or_real_detect(width, height, energy_map, threshold):
     cell_scores.sort(key=lambda item: item[0], reverse=True)
 
     # Greedily merge adjacent active cells into bounding boxes
+    active_cells = {(gx, gy) for _, gx, gy in cell_scores}
     used = set()
     for score, gx, gy in cell_scores[:12]: # Top detections
         if (gx, gy) in used:
@@ -68,7 +69,7 @@ def _mock_or_real_detect(width, height, energy_map, threshold):
 
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (1, 1)]:
             nx, ny = gx + dx, gy + dy
-            if (nx, ny) in cell_scores and (nx, ny) not in used:
+            if (nx, ny) in active_cells and (nx, ny) not in used:
                 min_x = min(min_x, nx)
                 max_x = max(max_x, nx)
                 min_y = min(min_y, ny)

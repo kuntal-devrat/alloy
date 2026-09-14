@@ -212,7 +212,11 @@ static GEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Commands for the process-global watchdog thread.
 enum WatchdogCmd {
     /// Arm the deadline for the call identified by (tid, gen).
-    Arm { tid: usize, gen: usize, deadline: Instant },
+    Arm {
+        tid: usize,
+        gen: usize,
+        deadline: Instant,
+    },
     /// Stand down the call identified by `gen` (it finished first). Token-
     /// scoped: an unrelated call's cancel can never disarm THIS call's
     /// deadline (a real hazard with a single shared deadline slot when two
@@ -252,7 +256,11 @@ fn watchdog_ensure() -> &'static Mutex<mpsc::Sender<WatchdogCmd>> {
                     //    commands already sent).
                     loop {
                         match rx.try_recv() {
-                            Ok(WatchdogCmd::Arm { tid, gen, deadline: at }) => armed.push((tid, gen, at)),
+                            Ok(WatchdogCmd::Arm {
+                                tid,
+                                gen,
+                                deadline: at,
+                            }) => armed.push((tid, gen, at)),
                             Ok(WatchdogCmd::Cancel { gen }) => armed.retain(|&(_, g, _)| g != gen),
                             Err(mpsc::TryRecvError::Empty) => break,
                             Err(mpsc::TryRecvError::Disconnected) => return,
@@ -279,7 +287,8 @@ fn watchdog_ensure() -> &'static Mutex<mpsc::Sender<WatchdogCmd>> {
                             if armed_tid != 0 {
                                 if let Some(st) = INTERRUPT_STATE.get() {
                                     let gstate = unsafe { (st.gilstate_ensure)() };
-                                    let _lock = TEARDOWN_LOCK.lock().unwrap_or_else(|g| g.into_inner());
+                                    let _lock =
+                                        TEARDOWN_LOCK.lock().unwrap_or_else(|g| g.into_inner());
                                     if let Ok(mut fired) = FIRED_GENS.lock() {
                                         fired.push(armed_gen);
                                     }
@@ -301,7 +310,11 @@ fn watchdog_ensure() -> &'static Mutex<mpsc::Sender<WatchdogCmd>> {
                         .min()
                         .unwrap_or(Duration::from_secs(3600));
                     match rx.recv_timeout(wait) {
-                        Ok(WatchdogCmd::Arm { tid, gen, deadline: at }) => armed.push((tid, gen, at)),
+                        Ok(WatchdogCmd::Arm {
+                            tid,
+                            gen,
+                            deadline: at,
+                        }) => armed.push((tid, gen, at)),
                         Ok(WatchdogCmd::Cancel { gen }) => armed.retain(|&(_, g, _)| g != gen),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -322,7 +335,10 @@ fn watchdog_arm(tid: usize, gen: usize, deadline: Instant) {
 
 fn watchdog_cancel(gen: usize) {
     if let Some(tx) = WATCHDOG_TX.get() {
-        let _ = tx.lock().unwrap_or_else(|g| g.into_inner()).send(WatchdogCmd::Cancel { gen });
+        let _ = tx
+            .lock()
+            .unwrap_or_else(|g| g.into_inner())
+            .send(WatchdogCmd::Cancel { gen });
     }
 }
 
@@ -358,11 +374,12 @@ fn runtime() -> Result<&'static Arc<PyRuntime>, String> {
 /// [`finalize_interpreter`].
 pub fn live_backends() -> usize {
     LIVE_BACKENDS.load(Ordering::Relaxed)
-}    /// True once [`finalize_interpreter`] ran (successfully or not at the
-    /// interpreter level) — embed mode is off for the rest of the process.
-    pub fn is_finalized() -> bool {
-        FINALIZED.load(Ordering::Relaxed)
-    }
+}
+/// True once [`finalize_interpreter`] ran (successfully or not at the
+/// interpreter level) — embed mode is off for the rest of the process.
+pub fn is_finalized() -> bool {
+    FINALIZED.load(Ordering::Relaxed)
+}
 
 /// Cleanly shut the embedded interpreter down (`Py_FinalizeEx`). Optional:
 /// for library-embedded hosts that want python fully torn down at shutdown
@@ -424,7 +441,10 @@ fn init_runtime() -> Result<Arc<PyRuntime>, String> {
     // mode (the default) stays silent.
     if let Err(e) = &r {
         if embed_requested {
-            eprintln!("[alloy] python embed unavailable ({}); using child sidecars", e);
+            eprintln!(
+                "[alloy] python embed unavailable ({}); using child sidecars",
+                e
+            );
         }
     }
     r
@@ -457,7 +477,11 @@ fn candidate_libraries() -> Vec<Vec<u8>> {
 /// used to find the DLL when it is not on the loader path.
 fn python_home_dir() -> Option<String> {
     let py = std::env::var("ALLOY_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) { "python".to_string() } else { "python3".to_string() }
+        if cfg!(windows) {
+            "python".to_string()
+        } else {
+            "python3".to_string()
+        }
     });
     let out = std::process::Command::new(&py)
         .arg("-c")
@@ -468,7 +492,11 @@ fn python_home_dir() -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 #[cfg(windows)]
@@ -476,7 +504,10 @@ fn open_library_candidate(cand: &[u8]) -> Result<Handle, String> {
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
     let h = unsafe { LoadLibraryA(cand.as_ptr()) };
     if h.is_null() {
-        Err(format!("cannot load {}", String::from_utf8_lossy(&cand[..cand.len() - 1])))
+        Err(format!(
+            "cannot load {}",
+            String::from_utf8_lossy(&cand[..cand.len() - 1])
+        ))
     } else {
         Ok(h)
     }
@@ -511,7 +542,10 @@ unsafe fn get_sym(h: Handle, name: &CStr) -> Result<*mut std::ffi::c_void, Strin
     use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
     match GetProcAddress(h, name.as_ptr() as *const u8) {
         Some(p) => Ok(p as *mut std::ffi::c_void),
-        None => Err(format!("python library is missing symbol {}", name.to_string_lossy())),
+        None => Err(format!(
+            "python library is missing symbol {}",
+            name.to_string_lossy()
+        )),
     }
 }
 
@@ -519,7 +553,10 @@ unsafe fn get_sym(h: Handle, name: &CStr) -> Result<*mut std::ffi::c_void, Strin
 unsafe fn get_sym(h: Handle, name: &CStr) -> Result<*mut std::ffi::c_void, String> {
     let p = libc::dlsym(h, name.as_ptr());
     if p.is_null() {
-        Err(format!("python library is missing symbol {}", name.to_string_lossy()))
+        Err(format!(
+            "python library is missing symbol {}",
+            name.to_string_lossy()
+        ))
     } else {
         Ok(p)
     }
@@ -616,7 +653,9 @@ fn loaded_library_dir(h: Handle) -> Option<String> {
     if unsafe { dladdr(h, &mut info) } == 0 || info.dli_fname.is_null() {
         return None;
     }
-    let path = unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().to_string();
+    let path = unsafe { CStr::from_ptr(info.dli_fname) }
+        .to_string_lossy()
+        .to_string();
     std::path::Path::new(&path)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
@@ -670,7 +709,11 @@ fn load_api() -> Result<(PyApi, Handle), String> {
         match unsafe { try_load_api(h) } {
             Ok(api) => return Ok((api, h)),
             Err(e) => {
-                last_err = format!("{} (from {})", e, String::from_utf8_lossy(&cand[..cand.len() - 1]));
+                last_err = format!(
+                    "{} (from {})",
+                    e,
+                    String::from_utf8_lossy(&cand[..cand.len() - 1])
+                );
                 // 1. A PATH-loaded forwarder reveals the full DLL's
                 //    directory — enrich in place, no python subprocess.
                 let mut enriched = false;
@@ -858,7 +901,9 @@ unsafe fn py_utf8(api: &PyApi, o: PyObj) -> String {
 /// `str(e).replace('\\',"\\\\").replace('\n',"\\n").replace(' ',"\\s")` —
 /// the VM's drain path unescapes it, so both backends must frame identically.
 fn escape_err(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\n', "\\n").replace(' ', "\\s")
+    s.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace(' ', "\\s")
 }
 
 /// Port of the child's `_enc`: bool/int/float/str/None/list|tuple → wire
@@ -885,12 +930,21 @@ unsafe fn enc_wire(rt: &PyRuntime, o: PyObj) -> String {
         let s = py_utf8(api, o);
         return format!("s:{}:{}", s.len(), s);
     }
-    if is_inst(api, &rt.types, o, rt.types.list_ty) || is_inst(api, &rt.types, o, rt.types.tuple_ty) {
+    if is_inst(api, &rt.types, o, rt.types.list_ty) || is_inst(api, &rt.types, o, rt.types.tuple_ty)
+    {
         let is_list = is_inst(api, &rt.types, o, rt.types.list_ty);
-        let n = if is_list { (api.py_list_size)(o) } else { (api.py_tuple_size)(o) };
+        let n = if is_list {
+            (api.py_list_size)(o)
+        } else {
+            (api.py_tuple_size)(o)
+        };
         let mut out = format!("a:{}", n);
         for i in 0..n {
-            let item = if is_list { (api.py_list_get_item)(o, i) } else { (api.py_tuple_get_item)(o, i) };
+            let item = if is_list {
+                (api.py_list_get_item)(o, i)
+            } else {
+                (api.py_tuple_get_item)(o, i)
+            };
             if !item.is_null() {
                 out.push_str(&enc_wire(rt, item));
             }
@@ -911,7 +965,9 @@ unsafe fn wire_arg(api: &PyApi, a: &str) -> Option<PyObj> {
     if let Some(rest) = a.strip_prefix("n:") {
         let is_int = !rest.is_empty()
             && (rest.chars().all(|c| c.is_ascii_digit())
-                || (rest.starts_with('-') && rest.len() > 1 && rest[1..].chars().all(|c| c.is_ascii_digit())));
+                || (rest.starts_with('-')
+                    && rest.len() > 1
+                    && rest[1..].chars().all(|c| c.is_ascii_digit())));
         if is_int {
             return Some((api.py_long_from_longlong)(rest.parse().ok()?));
         }
@@ -1142,7 +1198,8 @@ impl EmbedPython {
         self.module = std::ptr::null_mut();
         // Defensive: never underflow (a stray late Drop after finalization
         // must not wedge the guard at usize::MAX).
-        let _ = LIVE_BACKENDS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+        let _ =
+            LIVE_BACKENDS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
     }
 }
 

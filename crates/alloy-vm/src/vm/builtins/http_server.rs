@@ -1,8 +1,8 @@
+use super::json::serialize_value;
+use alloy_core::value::{PromiseState, PromiseStatus, Value, VmHost};
+use hashbrown::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
-use hashbrown::HashMap;
-use alloy_core::value::{PromiseState, PromiseStatus, Value, VmHost};
-use super::json::serialize_value;
 
 pub(crate) fn make_http_module() -> Value {
     let create_server = Value::native(Arc::new(|args, _vm| {
@@ -56,8 +56,6 @@ pub fn parse_http_request_full(text: &str) -> (String, String, String, Vec<(Stri
     (method, path, body, headers)
 }
 
-
-
 /// One in-flight HTTP connection: reading the request, running its handler,
 /// or done. Reads are non-blocking and incremental, so a client that connects
 /// and stalls mid-request never blocks the loop — it just sits here until it
@@ -81,11 +79,10 @@ struct PendingRequest {
 /// A request is complete once its header block ("\r\n\r\n") has arrived and,
 /// for requests declaring a body, all Content-Length bytes are in.
 pub(crate) fn request_complete(buf: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(buf);
-    let Some(header_end) = text.find("\r\n\r\n") else {
+    let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
         return false;
     };
-    let headers = &text[..header_end];
+    let headers = String::from_utf8_lossy(&buf[..header_end]);
     let body_start = header_end + 4;
     let content_len = headers
         .lines()
@@ -96,7 +93,7 @@ pub(crate) fn request_complete(buf: &[u8]) -> bool {
                 .and_then(|v| v.trim().parse::<usize>().ok())
         })
         .unwrap_or(0);
-    text.len().saturating_sub(body_start) >= content_len
+    buf.len().saturating_sub(body_start) >= content_len
 }
 
 /// Percent-decode a URL component (`+` → space, `%XX` → byte). Malformed
@@ -135,7 +132,9 @@ pub(crate) fn split_path_query(url: &str) -> (String, Vec<(String, String)>) {
     };
     let mut pairs = Vec::new();
     for part in q.split('&') {
-        if part.is_empty() { continue; }
+        if part.is_empty() {
+            continue;
+        }
         match part.split_once('=') {
             Some((k, v)) => pairs.push((url_decode(k), url_decode(v))),
             None => pairs.push((url_decode(part), String::new())),
@@ -146,22 +145,36 @@ pub(crate) fn split_path_query(url: &str) -> (String, Vec<(String, String)>) {
 
 /// Parse `Cookie: a=1; b=x` into pairs (names trimmed, values unquoted).
 pub(crate) fn parse_cookies(header: &str) -> Vec<(String, String)> {
-    header.split(';').filter_map(|p| {
-        let (k, v) = p.split_once('=')?;
-        let k = k.trim();
-        if k.is_empty() { return None; }
-        let v = v.trim().trim_matches('"');
-        Some((k.to_string(), url_decode(v)))
-    }).collect()
+    header
+        .split(';')
+        .filter_map(|p| {
+            let (k, v) = p.split_once('=')?;
+            let k = k.trim();
+            if k.is_empty() {
+                return None;
+            }
+            let v = v.trim().trim_matches('"');
+            Some((k.to_string(), url_decode(v)))
+        })
+        .collect()
 }
 
 pub(crate) fn reason_for(status: u16) -> &'static str {
     match status {
-        200 => "OK", 201 => "Created", 204 => "No Content",
-        301 => "Moved Permanently", 302 => "Found", 304 => "Not Modified",
-        400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-        404 => "Not Found", 405 => "Method Not Allowed", 409 => "Conflict",
-        422 => "Unprocessable Entity", 429 => "Too Many Requests",
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
         _ => "OK",
     }
@@ -190,7 +203,11 @@ fn start_handler(
     let send = Value::native(Arc::new(move |args, _vm| {
         let mut slot = s_send.body.lock().unwrap();
         *slot = args.first().map(|v| {
-            if let Some(s) = v.as_str() { s.as_bytes().to_vec() } else { serialize_value(v).into_bytes() }
+            if let Some(s) = v.as_str() {
+                s.as_bytes().to_vec()
+            } else {
+                serialize_value(v).into_bytes()
+            }
         });
         Value::undefined()
     }));
@@ -200,21 +217,31 @@ fn start_handler(
         let mut slot = s_json.body.lock().unwrap();
         *slot = args.first().map(|v| serialize_value(v).into_bytes());
         let mut ct = s_json.content_type.lock().unwrap();
-        if ct.is_none() { *ct = Some("application/json".to_string()); }
+        if ct.is_none() {
+            *ct = Some("application/json".to_string());
+        }
         Value::undefined()
     }));
     // res.text(s) / res.html(s): string bodies with content type.
     let s_text = slots.clone();
     let text = Value::native(Arc::new(move |args, _vm| {
-        let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let s = args
+            .first()
+            .map(|v| v.as_str().unwrap_or("").to_string())
+            .unwrap_or_default();
         *s_text.body.lock().unwrap() = Some(s.into_bytes());
         let mut ct = s_text.content_type.lock().unwrap();
-        if ct.is_none() { *ct = Some("text/plain; charset=utf-8".to_string()); }
+        if ct.is_none() {
+            *ct = Some("text/plain; charset=utf-8".to_string());
+        }
         Value::undefined()
     }));
     let s_html = slots.clone();
     let html = Value::native(Arc::new(move |args, _vm| {
-        let s = args.first().map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let s = args
+            .first()
+            .map(|v| v.as_str().unwrap_or("").to_string())
+            .unwrap_or_default();
         *s_html.body.lock().unwrap() = Some(s.into_bytes());
         *s_html.content_type.lock().unwrap() = Some("text/html; charset=utf-8".to_string());
         Value::undefined()
@@ -222,7 +249,11 @@ fn start_handler(
     // res.status(code): override the status (default 200).
     let s_status = slots.clone();
     let status = Value::native(Arc::new(move |args, _vm| {
-        let code = args.first().map(|v| v.to_number() as u16).unwrap_or(200).clamp(100, 599);
+        let code = args
+            .first()
+            .map(|v| v.to_number() as u16)
+            .unwrap_or(200)
+            .clamp(100, 599);
         *s_status.status.lock().unwrap() = code;
         Value::undefined()
     }));
@@ -231,9 +262,18 @@ fn start_handler(
     // never emits duplicate Content-Type headers).
     let s_set = slots.clone();
     let set = Value::native(Arc::new(move |args, _vm| {
-        let name = args.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let val = args.get(1).map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
-        if name.is_empty() { return Value::undefined(); }
+        let name = args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let val = args
+            .get(1)
+            .map(|v| v.as_str().unwrap_or("").to_string())
+            .unwrap_or_default();
+        if name.is_empty() {
+            return Value::undefined();
+        }
         if name.eq_ignore_ascii_case("content-type") {
             *s_set.content_type.lock().unwrap() = Some(val);
         } else {
@@ -255,25 +295,37 @@ fn start_handler(
     let (path_only, query) = split_path_query(&url);
     req.insert("path".to_string(), Value::string(path_only));
     let mut qmap = HashMap::new();
-    for (k, v) in &query { qmap.insert(k.clone(), Value::string(v.clone())); }
+    for (k, v) in &query {
+        qmap.insert(k.clone(), Value::string(v.clone()));
+    }
     req.insert("query".to_string(), Value::object(qmap));
     let mut hmap = HashMap::new();
     let mut cookie_hdr = String::new();
     for (k, v) in &headers {
         hmap.insert(k.to_ascii_lowercase(), Value::string(v.clone()));
-        if k.eq_ignore_ascii_case("cookie") { cookie_hdr = v.clone(); }
+        if k.eq_ignore_ascii_case("cookie") {
+            cookie_hdr = v.clone();
+        }
     }
     req.insert("headers".to_string(), Value::object(hmap));
     let mut cmap = HashMap::new();
-    for (k, v) in parse_cookies(&cookie_hdr) { cmap.insert(k, Value::string(v)); }
+    for (k, v) in parse_cookies(&cookie_hdr) {
+        cmap.insert(k, Value::string(v));
+    }
     req.insert("cookies".to_string(), Value::object(cmap));
     // Trust proxy headers when present (TLS-terminating reverse proxy pattern).
-    if let Some((_, proto)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-proto")) {
+    if let Some((_, proto)) = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-proto"))
+    {
         req.insert("protocol".to_string(), Value::string(proto.clone()));
     } else {
         req.insert("protocol".to_string(), Value::string("http".to_string()));
     }
-    if let Some((_, ip)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-for")) {
+    if let Some((_, ip)) = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-for"))
+    {
         let first = ip.split(',').next().unwrap_or("").trim().to_string();
         req.insert("ip".to_string(), Value::string(first));
     }
@@ -300,13 +352,27 @@ pub(crate) fn write_response(stream: &mut std::net::TcpStream, status: &str, bod
     let _ = status;
 }
 
-pub(crate) fn write_response_full(stream: &mut std::net::TcpStream, status: u16, content_type: Option<&str>, extra: &[(String, String)], body: &[u8]) {
+pub(crate) fn write_response_full(
+    stream: &mut std::net::TcpStream,
+    status: u16,
+    content_type: Option<&str>,
+    extra: &[(String, String)],
+    body: &[u8],
+) {
     let reason = reason_for(status);
     let ct = content_type.unwrap_or("application/json");
-    let mut head = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n", status, reason, ct, body.len());
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        status,
+        reason,
+        ct,
+        body.len()
+    );
     for (k, v) in extra {
         // CRLF injection guard: header names/values must be single-line.
-        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) { continue; }
+        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
+            continue;
+        }
         head.push_str(&format!("{}: {}\r\n", k, v));
     }
     head.push_str("\r\n");
@@ -322,10 +388,7 @@ pub fn bind_server(port: u16) -> Result<(std::net::TcpListener, u16), String> {
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("alloy http nonblocking error: {}", e))?;
-    let actual = listener
-        .local_addr()
-        .map_err(|e| e.to_string())?
-        .port();
+    let actual = listener.local_addr().map_err(|e| e.to_string())?.port();
     println!("alloy http listening on 127.0.0.1:{}", actual);
     Ok((listener, actual))
 }
@@ -468,10 +531,21 @@ pub fn serve_loop(
                     // with the rejection reason as JSON.
                     Some(err_val) => {
                         let body = format!("{{\"error\": {}}}", serialize_value(&err_val));
-                        write_response_full(&mut pr.stream, 500, Some("application/json"), &[], body.as_bytes());
+                        write_response_full(
+                            &mut pr.stream,
+                            500,
+                            Some("application/json"),
+                            &[],
+                            body.as_bytes(),
+                        );
                     }
                     None => {
-                        let body = slots.body.lock().unwrap().clone().unwrap_or_else(|| b"ok".to_vec());
+                        let body = slots
+                            .body
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| b"ok".to_vec());
                         let status = *slots.status.lock().unwrap();
                         let status = if status == 0 { 200 } else { status };
                         let ct = slots.content_type.lock().unwrap().clone();
@@ -493,4 +567,3 @@ pub fn serve_loop(
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
-

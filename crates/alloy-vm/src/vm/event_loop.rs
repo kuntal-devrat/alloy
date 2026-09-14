@@ -21,8 +21,7 @@ impl Vm {
             self.drain_spawn_completions();
             self.drain_cross_thread_inbox();
             while let Some(addr) = self.microtasks.pop_front() {
-                let mt =
-                    unsafe { self.microtask_arena.read_at(addr as *const Microtask) };
+                let mt = unsafe { self.microtask_arena.read_at(addr as *const Microtask) };
                 self.resume(mt);
             }
             self.microtask_arena.reset();
@@ -38,8 +37,7 @@ impl Vm {
                 self.timers.retain(|t| t.when > now);
                 for (id, cb, period) in due {
                     if let Some(p) = period {
-                        let when =
-                            self.epoch.elapsed().as_secs_f64() * 1000.0 + p.max(0.0);
+                        let when = self.epoch.elapsed().as_secs_f64() * 1000.0 + p.max(0.0);
                         let seq = self.next_cont_id;
                         self.next_cont_id += 1;
                         self.timers.push(Timer {
@@ -141,9 +139,20 @@ impl Vm {
     }
 
     pub(crate) fn resume(&mut self, mt: Microtask) {
-        let Microtask { id, value, rejected } = mt;
+        let Microtask {
+            id,
+            value,
+            rejected,
+        } = mt;
         match self.continuations.remove(&id) {
-            Some(Continuation::Suspended { stack, frames, cells, handlers, pc, program_id }) => {
+            Some(Continuation::Suspended {
+                stack,
+                frames,
+                cells,
+                handlers,
+                pc,
+                program_id,
+            }) => {
                 self.stack.restore(stack);
                 self.call_stack = frames;
                 self.cells_stack = cells;
@@ -162,7 +171,11 @@ impl Vm {
                     self.dispatch(pc);
                 }
             }
-            Some(Continuation::Callback { callback, on_rejected, promise }) => {
+            Some(Continuation::Callback {
+                callback,
+                on_rejected,
+                promise,
+            }) => {
                 let handler = if rejected { on_rejected } else { callback };
                 let handler = match handler {
                     Some(h) => h,
@@ -226,7 +239,10 @@ impl Vm {
 
     pub(crate) fn reject_at_boundary(&mut self, bi: usize, exc: Value) -> ThrowResult {
         let b = self.call_stack[bi].clone();
-        let promise = self.stack.at(b.base_slot + b.promise_slot.unwrap() as usize).clone();
+        let promise = self
+            .stack
+            .at(b.base_slot + b.promise_slot.unwrap() as usize)
+            .clone();
         if let Some(p) = promise.as_promise() {
             self.reject_promise(p, exc);
         }
@@ -249,7 +265,11 @@ impl Vm {
 
     pub(crate) fn resolve_promise(&mut self, promise: &Arc<Mutex<PromiseState>>, value: Value) {
         if let Some(inner) = value.as_promise() {
-            let inner_status = inner.lock().unwrap_or_else(|g| g.into_inner()).status.clone();
+            let inner_status = inner
+                .lock()
+                .unwrap_or_else(|g| g.into_inner())
+                .status
+                .clone();
             match inner_status {
                 PromiseStatus::Fulfilled(v) => {
                     return self.resolve_promise(promise, v);
@@ -282,7 +302,11 @@ impl Vm {
     }
 
     pub(crate) fn enqueue_microtask(&mut self, id: u64, value: Value, rejected: bool) {
-        let ptr = self.microtask_arena.alloc_at(Microtask { id, value, rejected });
+        let ptr = self.microtask_arena.alloc_at(Microtask {
+            id,
+            value,
+            rejected,
+        });
         self.microtasks.push_back(ptr as usize);
     }
 
@@ -313,14 +337,22 @@ impl Vm {
             None => return Value::undefined(),
         };
         let is_fn = |v: &Value| v.is_function() || v.is_native();
-        let callback = if is_fn(&callback) { Some(callback) } else { None };
+        let callback = if is_fn(&callback) {
+            Some(callback)
+        } else {
+            None
+        };
         let on_rejected = on_rejected.filter(&is_fn);
         let chained = self.new_promise_arc();
         let id = self.next_cont_id;
         self.next_cont_id += 1;
         self.continuations.insert(
             id,
-            Continuation::Callback { callback, on_rejected, promise: chained.clone() },
+            Continuation::Callback {
+                callback,
+                on_rejected,
+                promise: chained.clone(),
+            },
         );
         let mut flush: Option<(Value, bool)> = None;
         {
@@ -342,8 +374,19 @@ impl Vm {
         let seq = self.next_cont_id;
         let id = self.next_cont_id;
         self.next_cont_id += 1;
-        self.timers.push(Timer { when, seq, id, period, callback });
-        self.timers.sort_by(|a, b| a.when.partial_cmp(&b.when).unwrap_or(std::cmp::Ordering::Equal).then(a.seq.cmp(&b.seq)));
+        self.timers.push(Timer {
+            when,
+            seq,
+            id,
+            period,
+            callback,
+        });
+        self.timers.sort_by(|a, b| {
+            a.when
+                .partial_cmp(&b.when)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.seq.cmp(&b.seq))
+        });
         id
     }
 

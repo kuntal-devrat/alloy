@@ -1,7 +1,7 @@
+use alloy_core::value::{ChannelState, Value, VmHost};
+use hashbrown::HashMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use hashbrown::HashMap;
-use alloy_core::value::{ChannelState, Value, VmHost};
 /// A Map/Set *computed* property that cannot live on the prototype as a
 /// shared native: `size` must read the instance's table (JS exposes it as a
 /// getter, which this engine doesn't model), so it is synthesized per read.
@@ -11,10 +11,7 @@ pub(crate) fn container_prop(obj: &Value, prop: &Value) -> Option<Value> {
     if prop.as_str() == Some("size") {
         // Only Map/Set have a `size`; Error (3) and Date (4) instances read
         // their props through the normal proto walk instead.
-        let c = obj
-            .as_object()
-            .map(|o| o.borrow().container)
-            .unwrap_or(0);
+        let c = obj.as_object().map(|o| o.borrow().container).unwrap_or(0);
         if c == 1 || c == 2 {
             return Some(Value::int(container_len(obj)));
         }
@@ -234,13 +231,16 @@ pub(crate) fn container_entries(m: &Value) -> Value {
 /// usage (`m.set(k, v)` after construction).
 pub(crate) fn make_map_ctor() -> Value {
     let proto = Value::object_with_proto(Value::undefined());
-    for name in ["get", "set", "has", "delete", "clear", "keys", "values", "entries", "forEach"] {
+    for name in [
+        "get", "set", "has", "delete", "clear", "keys", "values", "entries", "forEach",
+    ] {
         if let Some(od) = proto.as_object() {
             od.borrow_mut().set(name, container_method_native(name));
         }
     }
     if let Some(od) = proto.as_object() {
-        od.borrow_mut().set("\0sym_1", container_method_native("entries"));
+        od.borrow_mut()
+            .set("\0sym_1", container_method_native("entries"));
     }
     let ctor_proto = proto.clone();
     let ctor = Arc::new(move |args: &[Value], vm: &mut dyn VmHost| {
@@ -252,7 +252,11 @@ pub(crate) fn make_map_ctor() -> Value {
                         let eb = entry.borrow();
                         if eb.len() > 0 {
                             let k = eb.get(0);
-                            let v = if eb.len() > 1 { eb.get(1) } else { Value::undefined() };
+                            let v = if eb.len() > 1 {
+                                eb.get(1)
+                            } else {
+                                Value::undefined()
+                            };
                             container_insert(&m, k, v, vm);
                         }
                     }
@@ -267,13 +271,16 @@ pub(crate) fn make_map_ctor() -> Value {
 /// The `Set` constructor — same shape as [`make_map_ctor`] with container 2.
 pub(crate) fn make_set_ctor() -> Value {
     let proto = Value::object_with_proto(Value::undefined());
-    for name in ["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"] {
+    for name in [
+        "add", "has", "delete", "clear", "keys", "values", "entries", "forEach",
+    ] {
         if let Some(od) = proto.as_object() {
             od.borrow_mut().set(name, container_method_native(name));
         }
     }
     if let Some(od) = proto.as_object() {
-        od.borrow_mut().set("\0sym_1", container_method_native("values"));
+        od.borrow_mut()
+            .set("\0sym_1", container_method_native("values"));
     }
     let ctor_proto = proto.clone();
     let ctor = Arc::new(move |args: &[Value], vm: &mut dyn VmHost| {
@@ -290,7 +297,6 @@ pub(crate) fn make_set_ctor() -> Value {
     Value::native_ctor(ctor, proto)
 }
 
-
 /// Message-passing concurrency primitive: `channel.create()` returns a
 /// bidirectional FIFO. `send` resolves the oldest pending `recv()` promise (or
 /// buffers), `recv` takes the oldest message (or parks on a promise the event
@@ -303,9 +309,8 @@ pub(crate) fn make_set_ctor() -> Value {
 /// way two VMs can share a channel, since Values (arena pointers) cannot be
 /// serialized. Named channels therefore carry their messages as bytes (see
 /// `ChannelItem`). Entries live for the process, like a global registry.
-static NAMED_CHANNELS: std::sync::OnceLock<
-    Mutex<HashMap<String, Arc<Mutex<ChannelState>>>>,
-> = std::sync::OnceLock::new();
+static NAMED_CHANNELS: std::sync::OnceLock<Mutex<HashMap<String, Arc<Mutex<ChannelState>>>>> =
+    std::sync::OnceLock::new();
 
 pub(crate) fn named_channels() -> &'static Mutex<HashMap<String, Arc<Mutex<ChannelState>>>> {
     NAMED_CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -352,4 +357,3 @@ pub(crate) fn make_channel_module() -> Value {
     m.insert("get".to_string(), get);
     Value::object(m)
 }
-

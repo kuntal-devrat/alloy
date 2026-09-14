@@ -118,7 +118,10 @@ fn reap_orphaned_python_children_inner(dir: &Path, now: u64) -> usize {
         let Some(rest) = name.strip_prefix("alloy_py_sidecar_") else {
             continue;
         };
-        let Some(child_pid) = rest.strip_suffix(".tmp").and_then(|p| p.parse::<u32>().ok()) else {
+        let Some(child_pid) = rest
+            .strip_suffix(".tmp")
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
             continue;
         };
         // Content: `parent_pid\nsegment_path\n` — only the first line
@@ -296,9 +299,7 @@ pub(crate) fn decode_wire(s: &[u8], i: &mut usize) -> Result<Value, String> {
                 return Err("bad string token".to_string());
             }
             *i += 1;
-            let bytes = s
-                .get(*i..*i + len)
-                .ok_or("string token truncated")?;
+            let bytes = s.get(*i..*i + len).ok_or("string token truncated")?;
             *i += len;
             Ok(Value::string(String::from_utf8_lossy(bytes).to_string()))
         }
@@ -322,7 +323,10 @@ pub(crate) fn decode_wire(s: &[u8], i: &mut usize) -> Result<Value, String> {
             }
             Ok(Value::array(elems))
         }
-        _ => Err(format!("python sidecar sent an unparseable result (offset {})", *i)),
+        _ => Err(format!(
+            "python sidecar sent an unparseable result (offset {})",
+            *i
+        )),
     }
 }
 
@@ -474,9 +478,17 @@ impl ChildSidecar {
     /// Spawn the sidecar for `py_file` and handshake. `shared_path` is the
     /// path of the file backing the shared segment (from
     /// `SidecarMemory::file_path`).
-    pub fn start(shared_path: &str, shared_cap: usize, py_file: &str) -> Result<ChildSidecar, String> {
+    pub fn start(
+        shared_path: &str,
+        shared_cap: usize,
+        py_file: &str,
+    ) -> Result<ChildSidecar, String> {
         let python = std::env::var("ALLOY_PYTHON").unwrap_or_else(|_| {
-            if cfg!(windows) { "python".to_string() } else { "python3".to_string() }
+            if cfg!(windows) {
+                "python".to_string()
+            } else {
+                "python3".to_string()
+            }
         });
         let mut cmd = Command::new(&python);
         cmd.arg("-u")
@@ -492,15 +504,23 @@ impl ChildSidecar {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("cannot start python sidecar ({}): {}", python, e))?;
-        let stdin = child.stdin.take().ok_or_else(|| "sidecar stdin unavailable".to_string())?;
-        let stdout = child.stdout.take().ok_or_else(|| "sidecar stdout unavailable".to_string())?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "sidecar stdin unavailable".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "sidecar stdout unavailable".to_string())?;
         let mut stdout = BufReader::new(stdout);
         let mut line = String::new();
         let n = stdout
             .read_line(&mut line)
             .map_err(|e| format!("sidecar handshake read failed: {}", e))?;
         if n == 0 {
-            return Err("python sidecar exited during startup (is the file valid Python?)".to_string());
+            return Err(
+                "python sidecar exited during startup (is the file valid Python?)".to_string(),
+            );
         }
         let line = line.trim();
         let funcs = line
@@ -746,7 +766,13 @@ mod tests {
 
     #[test]
     fn wire_escaping_round_trips() {
-        for s in ["hello world", "line1\nline2", "back\\slash", "mixed \n\\ ", ""] {
+        for s in [
+            "hello world",
+            "line1\nline2",
+            "back\\slash",
+            "mixed \n\\ ",
+            "",
+        ] {
             assert_eq!(unescape(&escape(s)), s);
         }
     }
@@ -836,7 +862,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(status.is_some(), "orphaned child must be killed by the watchdog");
+        assert!(
+            status.is_some(),
+            "orphaned child must be killed by the watchdog"
+        );
         assert!(!m1.exists(), "orphan marker must be removed");
         assert_eq!(reaped, 1, "exactly the orphan is reaped");
 
@@ -850,7 +879,10 @@ mod tests {
         let _ = std::fs::remove_file(&m2);
 
         // The stale marker was removed despite the live parent.
-        assert!(!m3.exists(), "stale marker for a dead child must be removed");
+        assert!(
+            !m3.exists(),
+            "stale marker for a dead child must be removed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

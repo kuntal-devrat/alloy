@@ -55,7 +55,10 @@ mod tests {
         let resps = server.handle_incoming(&open_invalid.to_string());
         assert_eq!(resps.len(), 1);
         let notif = &resps[0];
-        assert_eq!(notif.method.as_deref(), Some("textDocument/publishDiagnostics"));
+        assert_eq!(
+            notif.method.as_deref(),
+            Some("textDocument/publishDiagnostics")
+        );
         let params = notif.params.as_ref().unwrap();
         let diags = params["diagnostics"].as_array().unwrap();
         assert!(!diags.is_empty(), "Should report syntax error diagnostic");
@@ -140,7 +143,8 @@ mod tests {
                         this.count++;
                     }
                 }
-            "#.to_string(),
+            "#
+            .to_string(),
         );
 
         let syms = server.handle_document_symbols("file:///test.ajs");

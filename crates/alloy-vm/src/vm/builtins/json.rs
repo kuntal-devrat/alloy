@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use hashbrown::HashMap;
-use alloy_core::value::{to_string_js, Value, VmHost};
 use crate::vm::core::unwrap_cell;
+use alloy_core::value::{to_string_js, Value, VmHost};
+use hashbrown::HashMap;
+use std::sync::Arc;
 
 pub(crate) fn json_stringify_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -49,6 +49,12 @@ fn json_serialize(
     visited: &mut Vec<u64>,
     vm: &mut dyn VmHost,
 ) -> Option<String> {
+    if depth > 512 {
+        vm.throw_exception(Value::string(
+            "TypeError: JSON structure too deeply nested".to_string(),
+        ));
+        return None;
+    }
     // Function replacer: transform (or drop) every value before serializing,
     // including the root (key ""). Undefined/function results collapse the
     // same way as the source value would.
@@ -111,6 +117,39 @@ fn json_serialize(
         ));
     }
     if let Some(od) = v.as_object() {
+        let to_json_opt = {
+            let od_b = od.borrow();
+            if od_b.container == alloy_core::value::DATE_CONTAINER {
+                if let Some(ms) = od_b
+                    .get(alloy_core::value::DATE_MS_KEY)
+                    .map(|x| x.to_number())
+                {
+                    if !ms.is_finite() {
+                        return Some("null".to_string());
+                    }
+                    return Some(format!("\"{}\"", alloy_core::value::date_to_iso_string(ms)));
+                }
+            }
+            od_b.get("toJSON").cloned().or_else(|| {
+                let mut curr = od_b.proto.clone();
+                while let Some(p) = curr.clone().as_object() {
+                    let pb = p.borrow();
+                    if let Some(f) = pb.get("toJSON") {
+                        return Some(f.clone());
+                    }
+                    curr = pb.proto.clone();
+                }
+                None
+            })
+        };
+        if let Some(f) = to_json_opt {
+            if f.as_function().is_some() || f.is_native() {
+                let transformed =
+                    vm.call_value_with_this(&f, Some(v.clone()), &[Value::string(key.to_string())]);
+                return json_serialize(&transformed, key, depth, indent, replacer, visited, vm);
+            }
+        }
+
         let id = v.bits();
         if visited.contains(&id) {
             vm.throw_exception(Value::string(
@@ -123,7 +162,7 @@ fn json_serialize(
         let entries: Vec<(&String, u32)> = od.shape.keys_by_offset();
         let mut parts: Vec<String> = Vec::new();
         for (k, off) in entries {
-            if od.deleted[off as usize] {
+            if od.deleted[off as usize] || k.starts_with('\0') {
                 continue;
             }
             // Key whitelist: applies to objects at every depth.
@@ -135,12 +174,14 @@ fn json_serialize(
             // Live-import cells serialize as their current value (an exports
             // object's properties are the module's own storage).
             let val = unwrap_cell(od.values[off as usize].clone());
-            if let Some(s) = json_serialize(&val, k, depth + 1, indent, replacer, visited, vm) { parts.push(format!(
-                "{}:{}{}",
-                json_stringify_escape(k),
-                if indent.is_empty() { "" } else { " " },
-                s
-            )) }
+            if let Some(s) = json_serialize(&val, k, depth + 1, indent, replacer, visited, vm) {
+                parts.push(format!(
+                    "{}:{}{}",
+                    json_stringify_escape(k),
+                    if indent.is_empty() { "" } else { " " },
+                    s
+                ))
+            }
         }
         visited.pop();
         if indent.is_empty() {
@@ -184,6 +225,7 @@ pub(crate) fn json_space(space: &Value) -> String {
 pub(crate) struct JsonParser {
     chars: Vec<char>,
     i: usize,
+    depth: usize,
 }
 
 impl JsonParser {
@@ -256,8 +298,7 @@ impl JsonParser {
                             if self.next() == Some('\\') && self.next() == Some('u') {
                                 let lo = self.hex4()?;
                                 if (0xDC00..=0xDFFF).contains(&lo) {
-                                    let cp =
-                                        0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                                    let cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
                                     out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                                 } else {
                                     self.i = save;
@@ -327,7 +368,11 @@ impl JsonParser {
 
     fn value(&mut self) -> Result<Value, String> {
         self.ws();
-        match self.peek() {
+        self.depth += 1;
+        if self.depth > 512 {
+            return Err("JSON structure too deeply nested".to_string());
+        }
+        let res = match self.peek() {
             Some('{') => self.obj(),
             Some('[') => self.arr(),
             Some('"') => Ok(Value::string(self.string()?)),
@@ -345,7 +390,9 @@ impl JsonParser {
             }
             Some(c) if c == '-' || c.is_ascii_digit() => self.number(),
             _ => Err("unexpected character".to_string()),
-        }
+        };
+        self.depth -= 1;
+        res
     }
 
     fn arr(&mut self) -> Result<Value, String> {
@@ -413,6 +460,7 @@ pub fn parse_json_str(s: &str) -> Result<Value, String> {
     JsonParser {
         chars: s.chars().collect(),
         i: 0,
+        depth: 0,
     }
     .parse()
 }
@@ -456,6 +504,7 @@ pub(crate) fn make_json_module() -> Value {
         let mut p = JsonParser {
             chars: s.chars().collect(),
             i: 0,
+            depth: 0,
         };
         match p.parse() {
             Ok(v) => v,
@@ -470,7 +519,6 @@ pub(crate) fn make_json_module() -> Value {
     m.insert("parse".to_string(), parse);
     Value::object(m)
 }
-
 
 pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);

@@ -39,7 +39,9 @@ impl Parser {
         (self.cur_line(), self.cur_col())
     }
 
-    pub fn peek(&self) -> &Token { self.tokens.get(self.pos).unwrap_or(&Token::Eof) }
+    pub fn peek(&self) -> &Token {
+        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
+    }
     pub fn advance(&mut self) -> Token {
         let t = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
         self.pos += 1;
@@ -48,7 +50,9 @@ impl Parser {
 
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>, CompileError> {
         let mut s = Vec::new();
-        while !matches!(self.peek(), Token::Eof) { s.push(self.parse_stmt()?); }
+        while !matches!(self.peek(), Token::Eof) {
+            s.push(self.parse_stmt()?);
+        }
         Ok(s)
     }
 
@@ -116,10 +120,14 @@ impl Parser {
                 self.advance();
                 if let Token::Ident(s) = self.peek().clone() {
                     self.advance();
-                    if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+                    if matches!(self.peek(), Token::Semicolon) {
+                        self.advance();
+                    }
                     Ok(Stmt::BreakLabel(s))
                 } else {
-                    if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+                    if matches!(self.peek(), Token::Semicolon) {
+                        self.advance();
+                    }
                     Ok(Stmt::Break)
                 }
             }
@@ -127,10 +135,14 @@ impl Parser {
                 self.advance();
                 if let Token::Ident(s) = self.peek().clone() {
                     self.advance();
-                    if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+                    if matches!(self.peek(), Token::Semicolon) {
+                        self.advance();
+                    }
                     Ok(Stmt::ContinueLabel(s))
                 } else {
-                    if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+                    if matches!(self.peek(), Token::Semicolon) {
+                        self.advance();
+                    }
                     Ok(Stmt::Continue)
                 }
             }
@@ -140,12 +152,17 @@ impl Parser {
                 self.advance(); // ident
                 self.advance(); // colon
                 let body = self.parse_stmt()?;
-                Ok(Stmt::Labeled { name: s, body: Box::new(body) })
+                Ok(Stmt::Labeled {
+                    name: s,
+                    body: Box::new(body),
+                })
             }
             Token::Throw => {
                 self.advance();
                 let e = self.parse_expr(0)?;
-                if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+                if matches!(self.peek(), Token::Semicolon) {
+                    self.advance();
+                }
                 Ok(Stmt::Throw(e))
             }
             Token::Try => self.parse_try(),
@@ -168,7 +185,7 @@ impl Parser {
     /// compiles normally.
     fn parse_export(&mut self) -> Result<Stmt, CompileError> {
         self.advance(); // export
-        // `export default expr` — stored under the reserved name `\0default`.
+                        // `export default expr` — stored under the reserved name `\0default`.
         if matches!(self.peek(), Token::Default) {
             self.advance();
             if matches!(self.peek(), Token::Function) {
@@ -225,7 +242,9 @@ impl Parser {
                 });
             }
             let e = self.parse_expr(0)?;
-            if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+            if matches!(self.peek(), Token::Semicolon) {
+                self.advance();
+            }
             return Ok(Stmt::Export {
                 pairs: vec![("default".to_string(), DEFAULT_EXPORT.to_string())],
                 stmt: Box::new(Stmt::Expr(e)),
@@ -244,12 +263,7 @@ impl Parser {
                             self.advance();
                             match self.advance() {
                                 Token::Ident(a) => a,
-                                t => {
-                                    return Err(CompileError::UnexpectedToken(format!(
-                                        "{:?}",
-                                        t
-                                    )))
-                                }
+                                t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                             }
                         } else {
                             binding.clone()
@@ -257,14 +271,16 @@ impl Parser {
                         pairs.push((name, binding));
                     }
                     Token::Comma => {}
-                    Token::Eof => {
-                        return Err(CompileError::UnexpectedToken("RBrace".to_string()))
-                    }
+                    Token::Eof => return Err(CompileError::UnexpectedToken("RBrace".to_string())),
                     t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                 }
             }
-            if matches!(self.peek(), Token::RBrace) { self.advance(); }
-            if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+            if matches!(self.peek(), Token::RBrace) {
+                self.advance();
+            }
+            if matches!(self.peek(), Token::Semicolon) {
+                self.advance();
+            }
             return Ok(Stmt::Export {
                 pairs,
                 stmt: Box::new(Stmt::Nop),
@@ -299,9 +315,7 @@ impl Parser {
                 };
                 (s, names)
             }
-            Token::Async
-                if matches!(self.tokens.get(self.pos + 1), Some(Token::Function)) =>
-            {
+            Token::Async if matches!(self.tokens.get(self.pos + 1), Some(Token::Function)) => {
                 self.advance(); // async
                 self.advance(); // function
                 let is_gen = if matches!(self.peek(), Token::Star) {
@@ -344,7 +358,9 @@ impl Parser {
                 // Initializers are AssignmentExpressions: the comma between
                 // declarators (`let a = 1, b = 2`) stays a separator.
                 Some(self.parse_expr(1)?)
-            } else { None };
+            } else {
+                None
+            };
             decls.push((pat, init));
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
@@ -352,7 +368,9 @@ impl Parser {
             }
             break;
         }
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+        if matches!(self.peek(), Token::Semicolon) {
+            self.advance();
+        }
         Ok(Stmt::VarDecl { decls })
     }
 
@@ -389,7 +407,10 @@ impl Parser {
                         self.advance();
                         let key = self.parse_expr(0)?;
                         if !matches!(self.peek(), Token::RBracket) {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
+                            return Err(CompileError::UnexpectedToken(format!(
+                                "{:?}",
+                                self.peek()
+                            )));
                         }
                         self.advance();
                         if !matches!(self.peek(), Token::Colon) {
@@ -401,7 +422,9 @@ impl Parser {
                         let sub = self.parse_pattern()?;
                         fields.push(ObjPatElem::Computed(key, sub));
                         match self.peek() {
-                            Token::Comma => { self.advance(); }
+                            Token::Comma => {
+                                self.advance();
+                            }
                             Token::RBrace => {}
                             t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                         }
@@ -424,7 +447,9 @@ impl Parser {
                     };
                     fields.push(ObjPatElem::Key(key, sub));
                     match self.peek() {
-                        Token::Comma => { self.advance(); }
+                        Token::Comma => {
+                            self.advance();
+                        }
                         Token::RBrace => {}
                         t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                     }
@@ -462,7 +487,9 @@ impl Parser {
                     }
                     elems.push(PatElem::Bind(self.parse_pattern()?));
                     match self.peek() {
-                        Token::Comma => { self.advance(); }
+                        Token::Comma => {
+                            self.advance();
+                        }
                         Token::RBracket => {}
                         t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                     }
@@ -497,12 +524,7 @@ impl Parser {
                             self.advance();
                             match self.advance() {
                                 Token::Ident(a) => a,
-                                t => {
-                                    return Err(CompileError::UnexpectedToken(format!(
-                                        "{:?}",
-                                        t
-                                    )))
-                                }
+                                t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                             }
                         } else {
                             exported.clone()
@@ -510,17 +532,19 @@ impl Parser {
                         pairs.push((exported, local));
                     }
                     Token::Comma => {}
-                    Token::Eof => {
-                        return Err(CompileError::UnexpectedToken("RBrace".to_string()))
-                    }
+                    Token::Eof => return Err(CompileError::UnexpectedToken("RBrace".to_string())),
                     t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                 }
             }
-            if matches!(self.peek(), Token::RBrace) { self.advance(); }
+            if matches!(self.peek(), Token::RBrace) {
+                self.advance();
+            }
             ImportKind::ModuleNamed(pairs)
         } else if matches!(self.peek(), Token::Star) {
             self.advance();
-            if matches!(self.peek(), Token::As) { self.advance(); }
+            if matches!(self.peek(), Token::As) {
+                self.advance();
+            }
             match self.advance() {
                 Token::Ident(s) => ImportKind::ModuleNamespace(s),
                 t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
@@ -554,8 +578,12 @@ impl Parser {
                 Token::Ident(s) => Some(s),
                 t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
             }
-        } else { None };
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+        } else {
+            None
+        };
+        if matches!(self.peek(), Token::Semicolon) {
+            self.advance();
+        }
         let kind = if src == "alloy:core" || src == "alloy:fs" {
             // Builtins: the braced names (or a `* as m` namespace) bind
             // directly as globals seeded with the native.
@@ -591,7 +619,13 @@ impl Parser {
         };
         let params = self.parse_params()?;
         let body = self.parse_block()?;
-        Ok(Stmt::FnDecl { name, params, body: Box::new(body), is_async, is_generator })
+        Ok(Stmt::FnDecl {
+            name,
+            params,
+            body: Box::new(body),
+            is_async,
+            is_generator,
+        })
     }
 
     /// True when the parenthesized group at the current position is followed
@@ -628,7 +662,9 @@ impl Parser {
     }
 
     fn parse_params(&mut self) -> Result<FnParams, CompileError> {
-        if matches!(self.peek(), Token::LParen) { self.advance(); }
+        if matches!(self.peek(), Token::LParen) {
+            self.advance();
+        }
         let mut params = Vec::new();
         let mut rest = None;
         if !matches!(self.peek(), Token::RParen) {
@@ -646,7 +682,10 @@ impl Parser {
                             "rest parameter must be last".to_string(),
                         ));
                     }
-                    params.push(ParamDef { pat: Pat::Bind(name), default: None });
+                    params.push(ParamDef {
+                        pat: Pat::Bind(name),
+                        default: None,
+                    });
                     rest = Some(params.len() - 1);
                     break;
                 }
@@ -658,7 +697,9 @@ impl Parser {
                     None
                 };
                 params.push(ParamDef { pat, default });
-                if !matches!(self.peek(), Token::Comma) { break; }
+                if !matches!(self.peek(), Token::Comma) {
+                    break;
+                }
                 self.advance();
             }
         }
@@ -673,8 +714,12 @@ impl Parser {
         self.advance();
         let e = if matches!(self.peek(), Token::Semicolon) || matches!(self.peek(), Token::RBrace) {
             None
-        } else { Some(self.parse_expr(0)?) };
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+        } else {
+            Some(self.parse_expr(0)?)
+        };
+        if matches!(self.peek(), Token::Semicolon) {
+            self.advance();
+        }
         Ok(Stmt::Return(e))
     }
 
@@ -685,8 +730,14 @@ impl Parser {
         let els = if matches!(self.peek(), Token::Else) {
             self.advance();
             Some(Box::new(self.parse_stmt()?))
-        } else { None };
-        Ok(Stmt::If { cond, then: Box::new(then), els })
+        } else {
+            None
+        };
+        Ok(Stmt::If {
+            cond,
+            then: Box::new(then),
+            els,
+        })
     }
 
     /// Parse a parenthesized expression. Used for grouping `(a + b)` and for
@@ -696,7 +747,9 @@ impl Parser {
     /// condition followed by `{` still parses.
     fn parse_paren(&mut self) -> Result<Expr, CompileError> {
         let had_paren = matches!(self.peek(), Token::LParen);
-        if had_paren { self.advance(); }
+        if had_paren {
+            self.advance();
+        }
         let e = self.parse_expr(0)?;
         if had_paren {
             if !matches!(self.peek(), Token::RParen) {
@@ -711,7 +764,10 @@ impl Parser {
         self.advance();
         let cond = self.parse_paren()?;
         let body = self.parse_stmt()?;
-        Ok(Stmt::While { cond, body: Box::new(body) })
+        Ok(Stmt::While {
+            cond,
+            body: Box::new(body),
+        })
     }
 
     fn parse_do(&mut self) -> Result<Stmt, CompileError> {
@@ -724,13 +780,20 @@ impl Parser {
         }
         self.advance(); // while
         let cond = self.parse_paren()?;
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        Ok(Stmt::DoWhile { cond, body: Box::new(body) })
+        if matches!(self.peek(), Token::Semicolon) {
+            self.advance();
+        }
+        Ok(Stmt::DoWhile {
+            cond,
+            body: Box::new(body),
+        })
     }
 
     fn parse_for(&mut self) -> Result<Stmt, CompileError> {
         self.advance();
-        if matches!(self.peek(), Token::LParen) { self.advance(); }
+        if matches!(self.peek(), Token::LParen) {
+            self.advance();
+        }
 
         // Detect `for (let x of ...)`, `for (let [a, b] of ...)`,
         // `for ({ a, b } in ...)` headers before falling back to the C-style
@@ -756,31 +819,59 @@ impl Parser {
             // SyntaxError (the comma is neither an operator nor a separator
             // here), so parse at min_bp 1 and let the trailing comma fail.
             let source = self.parse_expr(1)?;
-            if matches!(self.peek(), Token::RParen) { self.advance(); }
+            if matches!(self.peek(), Token::RParen) {
+                self.advance();
+            }
             let body = self.parse_stmt()?;
             if is_in {
-                return Ok(Stmt::ForIn { pat, declared, obj: source, body: Box::new(body) });
+                return Ok(Stmt::ForIn {
+                    pat,
+                    declared,
+                    obj: source,
+                    body: Box::new(body),
+                });
             } else {
-                return Ok(Stmt::ForOf { pat, declared, iterable: source, body: Box::new(body) });
+                return Ok(Stmt::ForOf {
+                    pat,
+                    declared,
+                    iterable: source,
+                    body: Box::new(body),
+                });
             }
         }
         self.pos = saved;
 
         let init = if matches!(self.peek(), Token::Semicolon) {
-            self.advance(); None
+            self.advance();
+            None
         } else if matches!(self.peek(), Token::Let) || matches!(self.peek(), Token::Const) {
             Some(Box::new(self.parse_var_decl()?))
         } else {
             Some(Box::new(self.parse_expr_stmt()?))
         };
-        let cond = if matches!(self.peek(), Token::Semicolon) { None }
-        else { Some(self.parse_expr(0)?) };
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
-        let update = if matches!(self.peek(), Token::RParen) { None }
-        else { Some(self.parse_expr(0)?) };
-        if matches!(self.peek(), Token::RParen) { self.advance(); }
+        let cond = if matches!(self.peek(), Token::Semicolon) {
+            None
+        } else {
+            Some(self.parse_expr(0)?)
+        };
+        if matches!(self.peek(), Token::Semicolon) {
+            self.advance();
+        }
+        let update = if matches!(self.peek(), Token::RParen) {
+            None
+        } else {
+            Some(self.parse_expr(0)?)
+        };
+        if matches!(self.peek(), Token::RParen) {
+            self.advance();
+        }
         let body = self.parse_stmt()?;
-        Ok(Stmt::For { init, cond, update, body: Box::new(body) })
+        Ok(Stmt::For {
+            init,
+            cond,
+            update,
+            body: Box::new(body),
+        })
     }
 
     fn parse_try(&mut self) -> Result<Stmt, CompileError> {
@@ -799,7 +890,9 @@ impl Parser {
             } else {
                 String::new()
             };
-            if matches!(self.peek(), Token::RParen) { self.advance(); }
+            if matches!(self.peek(), Token::RParen) {
+                self.advance();
+            }
             let block = self.parse_block()?;
             catch = Some((name, Box::new(block)));
         }
@@ -809,33 +902,54 @@ impl Parser {
             finally = Some(Box::new(block));
         }
         if catch.is_none() && finally.is_none() {
-            return Err(CompileError::UnexpectedToken("try without catch or finally".to_string()));
+            return Err(CompileError::UnexpectedToken(
+                "try without catch or finally".to_string(),
+            ));
         }
-        Ok(Stmt::Try { body: Box::new(body), catch, finally })
+        Ok(Stmt::Try {
+            body: Box::new(body),
+            catch,
+            finally,
+        })
     }
 
     fn parse_switch(&mut self) -> Result<Stmt, CompileError> {
         self.advance(); // switch
         let disc = self.parse_paren()?;
-        if matches!(self.peek(), Token::LBrace) { self.advance(); }
+        if matches!(self.peek(), Token::LBrace) {
+            self.advance();
+        }
         let mut cases = Vec::new();
         loop {
             match self.peek().clone() {
                 Token::Case => {
                     self.advance();
                     let test = self.parse_expr(0)?;
-                    if matches!(self.peek(), Token::Colon) { self.advance(); }
+                    if matches!(self.peek(), Token::Colon) {
+                        self.advance();
+                    }
                     let mut body = Vec::new();
-                    while !matches!(self.peek(), Token::Case | Token::Default | Token::RBrace | Token::Eof) {
+                    while !matches!(
+                        self.peek(),
+                        Token::Case | Token::Default | Token::RBrace | Token::Eof
+                    ) {
                         body.push(self.parse_stmt()?);
                     }
-                    cases.push(SwitchCase { test: Some(test), body });
+                    cases.push(SwitchCase {
+                        test: Some(test),
+                        body,
+                    });
                 }
                 Token::Default => {
                     self.advance();
-                    if matches!(self.peek(), Token::Colon) { self.advance(); }
+                    if matches!(self.peek(), Token::Colon) {
+                        self.advance();
+                    }
                     let mut body = Vec::new();
-                    while !matches!(self.peek(), Token::Case | Token::Default | Token::RBrace | Token::Eof) {
+                    while !matches!(
+                        self.peek(),
+                        Token::Case | Token::Default | Token::RBrace | Token::Eof
+                    ) {
                         body.push(self.parse_stmt()?);
                     }
                     cases.push(SwitchCase { test: None, body });
@@ -867,7 +981,11 @@ impl Parser {
             None
         };
         let methods = self.parse_class_body()?;
-        Ok(Stmt::Class { name, extends, methods })
+        Ok(Stmt::Class {
+            name,
+            extends,
+            methods,
+        })
     }
 
     /// `class [Name] extends Parent { â€¦ }` â€” a class expression.
@@ -888,12 +1006,18 @@ impl Parser {
             None
         };
         let methods = self.parse_class_body()?;
-        Ok(Expr::Class { name, extends, methods })
+        Ok(Expr::Class {
+            name,
+            extends,
+            methods,
+        })
     }
 
     /// `{ [static] [async] [*] [get|set] [#]name(params) { body } | [static] [#]name [= expr]; … }` — the class body.
     fn parse_class_body(&mut self) -> Result<Vec<MethodDef>, CompileError> {
-        if matches!(self.peek(), Token::LBrace) { self.advance(); }
+        if matches!(self.peek(), Token::LBrace) {
+            self.advance();
+        }
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::RBrace) && !matches!(self.peek(), Token::Eof) {
             if matches!(self.peek(), Token::Semicolon) {
@@ -903,7 +1027,13 @@ impl Parser {
             let mut is_static = false;
             if matches!(self.peek(), Token::Static) {
                 let next = self.tokens.get(self.pos + 1);
-                if !matches!(next, Some(Token::LParen) | Some(Token::Assign) | Some(Token::Semicolon) | Some(Token::RBrace)) {
+                if !matches!(
+                    next,
+                    Some(Token::LParen)
+                        | Some(Token::Assign)
+                        | Some(Token::Semicolon)
+                        | Some(Token::RBrace)
+                ) {
                     self.advance();
                     is_static = true;
                 }
@@ -916,7 +1046,13 @@ impl Parser {
             let mut is_async = false;
             if matches!(self.peek(), Token::Async) {
                 let next = self.tokens.get(self.pos + 1);
-                if !matches!(next, Some(Token::LParen) | Some(Token::Assign) | Some(Token::Semicolon) | Some(Token::RBrace)) {
+                if !matches!(
+                    next,
+                    Some(Token::LParen)
+                        | Some(Token::Assign)
+                        | Some(Token::Semicolon)
+                        | Some(Token::RBrace)
+                ) {
                     self.advance();
                     is_async = true;
                     if matches!(self.peek(), Token::Star) {
@@ -932,9 +1068,20 @@ impl Parser {
                 if let Token::Ident(ref s) = peek_tok {
                     if s == "get" || s == "set" {
                         let next = self.tokens.get(self.pos + 1);
-                        if !matches!(next, Some(Token::LParen) | Some(Token::Assign) | Some(Token::Semicolon) | Some(Token::RBrace) | None) {
+                        if !matches!(
+                            next,
+                            Some(Token::LParen)
+                                | Some(Token::Assign)
+                                | Some(Token::Semicolon)
+                                | Some(Token::RBrace)
+                                | None
+                        ) {
                             self.advance();
-                            kind = if s == "get" { MethodKind::Getter } else { MethodKind::Setter };
+                            kind = if s == "get" {
+                                MethodKind::Getter
+                            } else {
+                                MethodKind::Setter
+                            };
                         }
                     }
                 }
@@ -949,21 +1096,28 @@ impl Parser {
             };
 
             // If not followed by '(', this is a class field.
-            if matches!(self.peek(), Token::Assign | Token::Semicolon) || !matches!(self.peek(), Token::LParen) {
+            if matches!(self.peek(), Token::Assign | Token::Semicolon)
+                || !matches!(self.peek(), Token::LParen)
+            {
                 let init = if matches!(self.peek(), Token::Assign) {
                     self.advance(); // =
                     Some(self.parse_expr(1)?)
                 } else {
                     None
                 };
-                if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+                if matches!(self.peek(), Token::Semicolon) {
+                    self.advance();
+                }
                 methods.push(MethodDef {
                     name,
                     is_static,
                     is_async: false,
                     is_generator: false,
                     kind: MethodKind::Field,
-                    params: FnParams { params: Vec::new(), rest: None },
+                    params: FnParams {
+                        params: Vec::new(),
+                        rest: None,
+                    },
                     body: Box::new(Stmt::Nop),
                     init,
                 });
@@ -971,7 +1125,9 @@ impl Parser {
             }
 
             if !matches!(self.peek(), Token::LParen) {
-                return Err(CompileError::UnexpectedToken("expected '(' after method name".to_string()));
+                return Err(CompileError::UnexpectedToken(
+                    "expected '(' after method name".to_string(),
+                ));
             }
             self.advance(); // (
             let params = self.parse_params()?;
@@ -986,7 +1142,9 @@ impl Parser {
                 body,
                 init: None,
             });
-            if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+            if matches!(self.peek(), Token::Semicolon) {
+                self.advance();
+            }
         }
         if !matches!(self.peek(), Token::RBrace) {
             return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
@@ -1011,7 +1169,7 @@ impl Parser {
             }
             Token::LParen => {
                 // `new (factory())()` â€” parenthesized constructor expression.
-                
+
                 self.parse_paren()?
             }
             Token::LBracket | Token::Function | Token::Async => self.parse_expr(14)?,
@@ -1030,7 +1188,11 @@ impl Parser {
                             }
                         },
                     };
-                    callee = Expr::Prop { obj: Box::new(callee), prop, optional: false };
+                    callee = Expr::Prop {
+                        obj: Box::new(callee),
+                        prop,
+                        optional: false,
+                    };
                 }
                 Token::LBracket => {
                     self.advance();
@@ -1039,7 +1201,11 @@ impl Parser {
                         return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
                     }
                     self.advance();
-                    callee = Expr::Index { obj: Box::new(callee), index: Box::new(idx), optional: false };
+                    callee = Expr::Index {
+                        obj: Box::new(callee),
+                        index: Box::new(idx),
+                        optional: false,
+                    };
                 }
                 _ => break,
             }
@@ -1049,10 +1215,18 @@ impl Parser {
             self.advance();
             while !matches!(self.peek(), Token::RParen) {
                 let spread = matches!(self.peek(), Token::DotDotDot);
-                if spread { self.advance(); }
-                args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
+                if spread {
+                    self.advance();
+                }
+                args.push(Elem {
+                    spread,
+                    hole: false,
+                    expr: self.parse_expr(1)?,
+                });
                 match self.peek() {
-                    Token::Comma => { self.advance(); }
+                    Token::Comma => {
+                        self.advance();
+                    }
                     Token::RParen => {}
                     t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                 }
@@ -1062,11 +1236,16 @@ impl Parser {
             }
             self.advance();
         }
-        Ok(Expr::New { callee: Box::new(callee), args })
+        Ok(Expr::New {
+            callee: Box::new(callee),
+            args,
+        })
     }
 
     fn parse_block(&mut self) -> Result<Stmt, CompileError> {
-        if matches!(self.peek(), Token::LBrace) { self.advance(); }
+        if matches!(self.peek(), Token::LBrace) {
+            self.advance();
+        }
         let mut s = Vec::new();
         while !matches!(self.peek(), Token::RBrace) && !matches!(self.peek(), Token::Eof) {
             s.push(self.parse_stmt()?);
@@ -1080,7 +1259,9 @@ impl Parser {
 
     fn parse_expr_stmt(&mut self) -> Result<Stmt, CompileError> {
         let e = self.parse_expr(0)?;
-        if matches!(self.peek(), Token::Semicolon) { self.advance(); }
+        if matches!(self.peek(), Token::Semicolon) {
+            self.advance();
+        }
         Ok(Stmt::Expr(e))
     }
 
@@ -1118,18 +1299,42 @@ impl Parser {
         mut family: Option<&'static str>,
     ) -> Result<Expr, CompileError> {
         let mut lhs = match self.peek().clone() {
-            Token::Number(n) => { self.advance(); Expr::Num(n) }
-            Token::Int(i) => { self.advance(); Expr::Int(i) }
-            Token::StringLit(s) => { self.advance(); Expr::Str(s) }
-            Token::True => { self.advance(); Expr::Bool(true) }
-            Token::False => { self.advance(); Expr::Bool(false) }
-            Token::Null => { self.advance(); Expr::Null }
-            Token::Undefined => { self.advance(); Expr::Undef }
+            Token::Number(n) => {
+                self.advance();
+                Expr::Num(n)
+            }
+            Token::Int(i) => {
+                self.advance();
+                Expr::Int(i)
+            }
+            Token::StringLit(s) => {
+                self.advance();
+                Expr::Str(s)
+            }
+            Token::True => {
+                self.advance();
+                Expr::Bool(true)
+            }
+            Token::False => {
+                self.advance();
+                Expr::Bool(false)
+            }
+            Token::Null => {
+                self.advance();
+                Expr::Null
+            }
+            Token::Undefined => {
+                self.advance();
+                Expr::Undef
+            }
             Token::Regex { pattern, flags } => {
                 self.advance();
                 Expr::Regex { pattern, flags }
             }
-            Token::Ident(s) => { self.advance(); Expr::Ident(s) }
+            Token::Ident(s) => {
+                self.advance();
+                Expr::Ident(s)
+            }
             Token::Minus => {
                 self.advance();
                 Expr::Unary("-", Box::new(self.parse_expr(15)?))
@@ -1140,11 +1345,19 @@ impl Parser {
             }
             Token::PlusPlus => {
                 self.advance();
-                Expr::IncDec { target: Box::new(self.parse_expr(15)?), is_inc: true, is_prefix: true }
+                Expr::IncDec {
+                    target: Box::new(self.parse_expr(15)?),
+                    is_inc: true,
+                    is_prefix: true,
+                }
             }
             Token::MinusMinus => {
                 self.advance();
-                Expr::IncDec { target: Box::new(self.parse_expr(15)?), is_inc: false, is_prefix: true }
+                Expr::IncDec {
+                    target: Box::new(self.parse_expr(15)?),
+                    is_inc: false,
+                    is_prefix: true,
+                }
             }
             Token::Typeof => {
                 self.advance();
@@ -1170,10 +1383,7 @@ impl Parser {
                 self.advance();
                 Expr::Ident("this".into())
             }
-            Token::New => {
-                
-                self.parse_new_expr()?
-            }
+            Token::New => self.parse_new_expr()?,
             Token::Super => {
                 self.advance();
                 match self.peek() {
@@ -1192,18 +1402,32 @@ impl Parser {
                             let mut args = Vec::new();
                             while !matches!(self.peek(), Token::RParen) {
                                 let spread = matches!(self.peek(), Token::DotDotDot);
-                                if spread { self.advance(); }
-                                args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
+                                if spread {
+                                    self.advance();
+                                }
+                                args.push(Elem {
+                                    spread,
+                                    hole: false,
+                                    expr: self.parse_expr(1)?,
+                                });
                                 match self.peek() {
-                                    Token::Comma => { self.advance(); }
+                                    Token::Comma => {
+                                        self.advance();
+                                    }
                                     Token::RParen => {}
                                     t => {
-                                        return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
+                                        return Err(CompileError::UnexpectedToken(format!(
+                                            "{:?}",
+                                            t
+                                        )));
                                     }
                                 }
                             }
                             if !matches!(self.peek(), Token::RParen) {
-                                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
+                                return Err(CompileError::UnexpectedToken(format!(
+                                    "{:?}",
+                                    self.peek()
+                                )));
                             }
                             self.advance();
                             Some(args)
@@ -1217,10 +1441,18 @@ impl Parser {
                         let mut args = Vec::new();
                         while !matches!(self.peek(), Token::RParen) {
                             let spread = matches!(self.peek(), Token::DotDotDot);
-                            if spread { self.advance(); }
-                            args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
+                            if spread {
+                                self.advance();
+                            }
+                            args.push(Elem {
+                                spread,
+                                hole: false,
+                                expr: self.parse_expr(1)?,
+                            });
                             match self.peek() {
-                                Token::Comma => { self.advance(); }
+                                Token::Comma => {
+                                    self.advance();
+                                }
                                 Token::RParen => {}
                                 t => {
                                     return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
@@ -1228,7 +1460,10 @@ impl Parser {
                             }
                         }
                         if !matches!(self.peek(), Token::RParen) {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
+                            return Err(CompileError::UnexpectedToken(format!(
+                                "{:?}",
+                                self.peek()
+                            )));
                         }
                         self.advance();
                         Expr::SuperCall { args }
@@ -1240,10 +1475,7 @@ impl Parser {
                     }
                 }
             }
-            Token::Class => {
-                
-                self.parse_class_expr()?
-            }
+            Token::Class => self.parse_class_expr()?,
             Token::Async => {
                 self.advance();
                 if matches!(self.peek(), Token::Function) {
@@ -1259,30 +1491,52 @@ impl Parser {
                     }
                     let p = self.parse_params()?;
                     let b = self.parse_block()?;
-                    Expr::Lambda { params: p, body: Box::new(b), is_async: true, is_generator: is_gen, is_arrow: false }
+                    Expr::Lambda {
+                        params: p,
+                        body: Box::new(b),
+                        is_async: true,
+                        is_generator: is_gen,
+                        is_arrow: false,
+                    }
                 } else if matches!(self.peek(), Token::LParen) && self.looks_like_arrow_params() {
                     self.advance(); // (
                     let params = self.parse_params()?;
                     self.advance(); // =>
                     let body = self.parse_arrow_body()?;
-                    Expr::Lambda { params, body, is_async: true, is_generator: false, is_arrow: true }
+                    Expr::Lambda {
+                        params,
+                        body,
+                        is_async: true,
+                        is_generator: false,
+                        is_arrow: true,
+                    }
                 } else if matches!(self.peek(), Token::Ident(_)) {
                     // `async x => body`
                     let name = match self.advance() {
                         Token::Ident(s) => s,
                         _ => unreachable!(),
                     };
-                    if matches!(self.peek(), Token::Arrow) { self.advance(); }
+                    if matches!(self.peek(), Token::Arrow) {
+                        self.advance();
+                    }
                     let body = self.parse_arrow_body()?;
                     Expr::Lambda {
-                        params: FnParams { params: vec![ParamDef { pat: Pat::Bind(name), default: None }], rest: None },
+                        params: FnParams {
+                            params: vec![ParamDef {
+                                pat: Pat::Bind(name),
+                                default: None,
+                            }],
+                            rest: None,
+                        },
                         body,
                         is_async: true,
                         is_generator: false,
                         is_arrow: true,
                     }
                 } else {
-                    return Err(CompileError::UnexpectedToken("async without function/arrow".to_string()));
+                    return Err(CompileError::UnexpectedToken(
+                        "async without function/arrow".to_string(),
+                    ));
                 }
             }
             Token::LParen => {
@@ -1291,7 +1545,13 @@ impl Parser {
                     let params = self.parse_params()?;
                     self.advance(); // =>
                     let body = self.parse_arrow_body()?;
-                    Expr::Lambda { params, body, is_async: false, is_generator: false, is_arrow: true }
+                    Expr::Lambda {
+                        params,
+                        body,
+                        is_async: false,
+                        is_generator: false,
+                        is_arrow: true,
+                    }
                 } else {
                     self.advance();
                     let e = self.parse_expr(0)?;
@@ -1313,19 +1573,31 @@ impl Parser {
                     if matches!(self.peek(), Token::Comma) {
                         // Elision `[a, , b]`: an empty slot that evaluates to
                         // undefined (and maps to a hole in assignment targets).
-                        el.push(Elem { spread: false, hole: true, expr: Expr::Undef });
+                        el.push(Elem {
+                            spread: false,
+                            hole: true,
+                            expr: Expr::Undef,
+                        });
                         self.advance();
                         continue;
                     }
                     let spread = matches!(self.peek(), Token::DotDotDot);
-                    if spread { self.advance(); }
+                    if spread {
+                        self.advance();
+                    }
                     // Elements are AssignmentExpressions; the comma is the
                     // list separator, not the operator.
-                    el.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
+                    el.push(Elem {
+                        spread,
+                        hole: false,
+                        expr: self.parse_expr(1)?,
+                    });
                     // Commas are REQUIRED between elements (`[1 2]` is a
                     // SyntaxError in JS, not `[1, 2]`).
                     match self.peek() {
-                        Token::Comma => { self.advance(); }
+                        Token::Comma => {
+                            self.advance();
+                        }
                         Token::RBracket => {}
                         t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                     }
@@ -1349,7 +1621,13 @@ impl Parser {
                 }
                 let p = self.parse_params()?;
                 let b = self.parse_block()?;
-                Expr::Lambda { params: p, body: Box::new(b), is_async: false, is_generator: is_gen, is_arrow: false }
+                Expr::Lambda {
+                    params: p,
+                    body: Box::new(b),
+                    is_async: false,
+                    is_generator: is_gen,
+                    is_arrow: false,
+                }
             }
             Token::LBrace => {
                 self.advance();
@@ -1369,11 +1647,17 @@ impl Parser {
                             self.advance();
                             let k = self.parse_expr(0)?;
                             if !matches!(self.peek(), Token::RBracket) {
-                                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
+                                return Err(CompileError::UnexpectedToken(format!(
+                                    "{:?}",
+                                    self.peek()
+                                )));
                             }
                             self.advance();
                             if !matches!(self.peek(), Token::Colon) {
-                                return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
+                                return Err(CompileError::UnexpectedToken(format!(
+                                    "{:?}",
+                                    self.peek()
+                                )));
                             }
                             self.advance();
                             let v = self.parse_expr(1)?;
@@ -1430,7 +1714,13 @@ impl Parser {
                         Token::Ident(ref s)
                             if (s == "get" || s == "set")
                                 && matches!(self.tokens.get(self.pos + 2), Some(Token::LParen))
-                                && !matches!(self.tokens.get(self.pos + 1), Some(Token::Colon) | Some(Token::Comma) | Some(Token::RBrace) | Some(Token::LParen)) =>
+                                && !matches!(
+                                    self.tokens.get(self.pos + 1),
+                                    Some(Token::Colon)
+                                        | Some(Token::Comma)
+                                        | Some(Token::RBrace)
+                                        | Some(Token::LParen)
+                                ) =>
                         {
                             let is_getter = s == "get";
                             self.advance(); // get or set
@@ -1438,7 +1728,12 @@ impl Parser {
                                 Token::Ident(n) | Token::StringLit(n) => n,
                                 t => match keyword_text(&t) {
                                     Some(n) => n,
-                                    None => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
+                                    None => {
+                                        return Err(CompileError::UnexpectedToken(format!(
+                                            "{:?}",
+                                            t
+                                        )))
+                                    }
                                 },
                             };
                             self.advance(); // (
@@ -1465,7 +1760,10 @@ impl Parser {
                                 t => match keyword_text(&t) {
                                     Some(s) => s,
                                     None => {
-                                        return Err(CompileError::UnexpectedToken(format!("{:?}", t)));
+                                        return Err(CompileError::UnexpectedToken(format!(
+                                            "{:?}",
+                                            t
+                                        )));
                                     }
                                 },
                             };
@@ -1504,7 +1802,9 @@ impl Parser {
                         }
                     }
                     match self.peek() {
-                        Token::Comma => { self.advance(); }
+                        Token::Comma => {
+                            self.advance();
+                        }
                         Token::RBrace => {}
                         t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                     }
@@ -1523,7 +1823,15 @@ impl Parser {
                 } else {
                     false
                 };
-                let value = if matches!(self.peek(), Token::Semicolon | Token::RParen | Token::RBracket | Token::RBrace | Token::Comma | Token::Eof) {
+                let value = if matches!(
+                    self.peek(),
+                    Token::Semicolon
+                        | Token::RParen
+                        | Token::RBracket
+                        | Token::RBrace
+                        | Token::Comma
+                        | Token::Eof
+                ) {
                     None
                 } else {
                     Some(Box::new(self.parse_expr(1)?))
@@ -1533,7 +1841,9 @@ impl Parser {
             Token::Import => {
                 self.advance(); // import
                 if !matches!(self.peek(), Token::LParen) {
-                    return Err(CompileError::UnexpectedToken("expected '(' after import".to_string()));
+                    return Err(CompileError::UnexpectedToken(
+                        "expected '(' after import".to_string(),
+                    ));
                 }
                 self.advance(); // (
                 let arg = self.parse_expr(0)?;
@@ -1541,12 +1851,18 @@ impl Parser {
                     self.advance();
                 }
                 if !matches!(self.peek(), Token::RParen) {
-                    return Err(CompileError::UnexpectedToken("expected ')' after import argument".to_string()));
+                    return Err(CompileError::UnexpectedToken(
+                        "expected ')' after import argument".to_string(),
+                    ));
                 }
                 self.advance(); // )
                 Expr::Call {
                     callee: Box::new(Expr::Ident("__alloy_import".to_string())),
-                    args: vec![Elem { spread: false, hole: false, expr: arg }],
+                    args: vec![Elem {
+                        spread: false,
+                        hole: false,
+                        expr: arg,
+                    }],
                     optional: false,
                 }
             }
@@ -1559,15 +1875,23 @@ impl Parser {
                 let mut args = Vec::new();
                 while !matches!(self.peek(), Token::RParen) {
                     let spread = matches!(self.peek(), Token::DotDotDot);
-                    if spread { self.advance(); }
+                    if spread {
+                        self.advance();
+                    }
                     // Arguments are AssignmentExpressions; the comma is the
                     // list separator, not the operator.
-                    args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
+                    args.push(Elem {
+                        spread,
+                        hole: false,
+                        expr: self.parse_expr(1)?,
+                    });
                     // Commas are REQUIRED between arguments â€” `f(a b)` is a
                     // SyntaxError in JS, and a missing comma is how `0.0
                     // toString()` used to silently become two arguments.
                     match self.peek() {
-                        Token::Comma => { self.advance(); }
+                        Token::Comma => {
+                            self.advance();
+                        }
                         Token::RParen => {}
                         t => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                     }
@@ -1576,7 +1900,11 @@ impl Parser {
                     return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
                 }
                 self.advance();
-                lhs = Expr::Call { callee: Box::new(lhs), args, optional: false };
+                lhs = Expr::Call {
+                    callee: Box::new(lhs),
+                    args,
+                    optional: false,
+                };
                 continue;
             } else if matches!(self.peek(), Token::Dot) {
                 self.advance();
@@ -1589,7 +1917,11 @@ impl Parser {
                         None => return Err(CompileError::UnexpectedToken(format!("{:?}", t))),
                     },
                 };
-                lhs = Expr::Prop { obj: Box::new(lhs), prop, optional: false };
+                lhs = Expr::Prop {
+                    obj: Box::new(lhs),
+                    prop,
+                    optional: false,
+                };
                 continue;
             } else if matches!(self.peek(), Token::QuestionDot) {
                 // Optional chaining: `o?.p`, `o?.[k]`, `f?.()`. The `?.` must
@@ -1603,7 +1935,10 @@ impl Parser {
                         self.advance();
                         let idx = self.parse_expr(0)?;
                         if !matches!(self.peek(), Token::RBracket) {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
+                            return Err(CompileError::UnexpectedToken(format!(
+                                "{:?}",
+                                self.peek()
+                            )));
                         }
                         self.advance();
                         lhs = Expr::Index {
@@ -1620,7 +1955,11 @@ impl Parser {
                             if spread {
                                 self.advance();
                             }
-                            args.push(Elem { spread, hole: false, expr: self.parse_expr(1)? });
+                            args.push(Elem {
+                                spread,
+                                hole: false,
+                                expr: self.parse_expr(1)?,
+                            });
                             match self.peek() {
                                 Token::Comma => {
                                     self.advance();
@@ -1632,7 +1971,10 @@ impl Parser {
                             }
                         }
                         if !matches!(self.peek(), Token::RParen) {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
+                            return Err(CompileError::UnexpectedToken(format!(
+                                "{:?}",
+                                self.peek()
+                            )));
                         }
                         self.advance();
                         lhs = Expr::Call {
@@ -1653,7 +1995,10 @@ impl Parser {
                             };
                         }
                         None => {
-                            return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
+                            return Err(CompileError::UnexpectedToken(format!(
+                                "{:?}",
+                                self.peek()
+                            )));
                         }
                     },
                 }
@@ -1665,7 +2010,11 @@ impl Parser {
                     return Err(CompileError::UnexpectedToken(format!("{:?}", self.peek())));
                 }
                 self.advance();
-                lhs = Expr::Index { obj: Box::new(lhs), index: Box::new(idx), optional: false };
+                lhs = Expr::Index {
+                    obj: Box::new(lhs),
+                    index: Box::new(idx),
+                    optional: false,
+                };
                 continue;
             } else if matches!(self.peek(), Token::Arrow) && matches!(&lhs, Expr::Ident(_)) {
                 // Single-parameter arrow shorthand: `x => body`.
@@ -1676,7 +2025,13 @@ impl Parser {
                 self.advance(); // =>
                 let body = self.parse_arrow_body()?;
                 lhs = Expr::Lambda {
-                    params: FnParams { params: vec![ParamDef { pat: Pat::Bind(name), default: None }], rest: None },
+                    params: FnParams {
+                        params: vec![ParamDef {
+                            pat: Pat::Bind(name),
+                            default: None,
+                        }],
+                        rest: None,
+                    },
                     body,
                     is_async: false,
                     is_generator: false,
@@ -1687,7 +2042,11 @@ impl Parser {
                 // Postfix `x++` / `x--`; binds tighter than any binary op.
                 let is_inc = matches!(self.peek(), Token::PlusPlus);
                 self.advance();
-                lhs = Expr::IncDec { target: Box::new(lhs), is_inc, is_prefix: false };
+                lhs = Expr::IncDec {
+                    target: Box::new(lhs),
+                    is_inc,
+                    is_prefix: false,
+                };
                 continue;
             }
             let (op, bp): (&str, u8) = match self.peek() {
@@ -1766,7 +2125,9 @@ impl Parser {
                 }
                 _ => break,
             };
-            if bp < min_bp { break; }
+            if bp < min_bp {
+                break;
+            }
             // `??` cannot be mixed with `&&`/`||` in one unparenthesized
             // expression (JS SyntaxError). The family of the incoming parse
             // level flows down through the RHS recursion, so the check fires
@@ -1790,14 +2151,30 @@ impl Parser {
             // Assignment operators and `**` are right-associative: their RHS
             // parses at the same precedence, so `a = b = c` chains into
             // `a = (b = c)` and `2 ** 3 ** 2` into `2 ** (3 ** 2)`.
-            let is_assign = op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/="
-                || op == "%=" || op == "&=" || op == "|=" || op == "^=" || op == "<<="
-                || op == ">>=" || op == ">>>=" || op == "**=" || op == "&&=" || op == "||="
+            let is_assign = op == "="
+                || op == "+="
+                || op == "-="
+                || op == "*="
+                || op == "/="
+                || op == "%="
+                || op == "&="
+                || op == "|="
+                || op == "^="
+                || op == "<<="
+                || op == ">>="
+                || op == ">>>="
+                || op == "**="
+                || op == "&&="
+                || op == "||="
                 || op == "??=";
             let right_assoc = is_assign || op == "**";
             let rhs = self.parse_expr_inner(if right_assoc { bp } else { bp + 1 }, next_family)?;
             lhs = if is_assign {
-                Expr::Assign { target: Box::new(lhs), op, value: Box::new(rhs) }
+                Expr::Assign {
+                    target: Box::new(lhs),
+                    op,
+                    value: Box::new(rhs),
+                }
             } else {
                 Expr::Bin(op, Box::new(lhs), Box::new(rhs))
             };
@@ -1851,4 +2228,3 @@ impl Parser {
         Ok(lhs)
     }
 }
-

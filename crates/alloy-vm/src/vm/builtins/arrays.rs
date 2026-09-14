@@ -1,14 +1,17 @@
-use std::sync::{Arc, Mutex};
-use hashbrown::HashMap;
-use alloy_core::value::{to_string_js, ArrayData, ObjectData, Value, VmHost};
+use super::containers::container_pairs;
 use crate::vm::alu::strict_equal;
 use crate::vm::core::unwrap_cell;
-use super::containers::container_pairs;
+use alloy_core::value::{to_string_js, ArrayData, ObjectData, Value, VmHost};
+use hashbrown::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Stable bottom-up merge sort (V8's sort is stable; ES2019 requires it).
 /// `cmp` must return `Less`/`Equal`/`Greater`; equal elements keep their
 /// input order.
-pub(crate) fn stable_merge_sort<T: Clone>(v: &mut [T], mut cmp: impl FnMut(&T, &T) -> std::cmp::Ordering) {
+pub(crate) fn stable_merge_sort<T: Clone>(
+    v: &mut [T],
+    mut cmp: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) {
     let n = v.len();
     if n <= 1 {
         return;
@@ -48,7 +51,6 @@ pub(crate) fn stable_merge_sort<T: Clone>(v: &mut [T], mut cmp: impl FnMut(&T, &
         width *= 2;
     }
 }
-
 
 pub(crate) fn iterable_display(v: &Value) -> String {
     if v.is_undefined() {
@@ -133,7 +135,10 @@ pub(crate) fn in_operator_probe(obj: &Value, key: &str) -> Option<bool> {
             let Some(c) = cur.as_object() else { break };
             let (hit, next) = {
                 let b = c.borrow();
-                (b.shape.get(key).is_some_and(|off| !b.deleted[off as usize]), b.proto.clone())
+                (
+                    b.shape.get(key).is_some_and(|off| !b.deleted[off as usize]),
+                    b.proto.clone(),
+                )
             };
             if hit {
                 return Some(true);
@@ -198,7 +203,9 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                     alloy_core::value::ArrayData::Ints(vs) => {
                         let mut out = String::with_capacity(vs.len() * 3);
                         for (i, n) in vs.iter().enumerate() {
-                            if i > 0 { out.push_str(&sep); }
+                            if i > 0 {
+                                out.push_str(&sep);
+                            }
                             out.push_str(&n.to_string());
                         }
                         Value::string(out)
@@ -306,16 +313,23 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
             if let Some(ad) = arr.as_array() {
                 let ad = ad.borrow();
                 let needle = args.first().cloned().unwrap_or(Value::undefined());
-                let from = args.get(1).map(|v| {
-                    let x = v.to_number();
-                    if x.is_nan() {
-                        0
-                    } else {
-                        x.trunc() as i64
-                    }
-                }).unwrap_or(0);
+                let from = args
+                    .get(1)
+                    .map(|v| {
+                        let x = v.to_number();
+                        if x.is_nan() {
+                            0
+                        } else {
+                            x.trunc() as i64
+                        }
+                    })
+                    .unwrap_or(0);
                 let n = ad.len() as i64;
-                let mut i = if from < 0 { (n + from).max(0) } else { from.min(n) };
+                let mut i = if from < 0 {
+                    (n + from).max(0)
+                } else {
+                    from.min(n)
+                };
                 while i < n {
                     if strict_equal(&ad.get(i as usize), &needle) {
                         return Value::int(i);
@@ -331,16 +345,23 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
             if let Some(ad) = arr.as_array() {
                 let ad = ad.borrow();
                 let needle = args.first().cloned().unwrap_or(Value::undefined());
-                let from = args.get(1).map(|v| {
-                    let x = v.to_number();
-                    if x.is_nan() {
-                        0
-                    } else {
-                        x.trunc() as i64
-                    }
-                }).unwrap_or(0);
+                let from = args
+                    .get(1)
+                    .map(|v| {
+                        let x = v.to_number();
+                        if x.is_nan() {
+                            0
+                        } else {
+                            x.trunc() as i64
+                        }
+                    })
+                    .unwrap_or(0);
                 let n = ad.len() as i64;
-                let mut i = if from < 0 { (n + from).max(0) } else { from.min(n) };
+                let mut i = if from < 0 {
+                    (n + from).max(0)
+                } else {
+                    from.min(n)
+                };
                 let needle_nan = needle.is_number() && needle.to_number().is_nan();
                 while i < n {
                     let e = ad.get(i as usize);
@@ -546,12 +567,10 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                     start = 1;
                 }
                 for i in start..vals.len() {
-                    acc = vm.call_value(&cb, &[
-                        acc,
-                        vals[i].clone(),
-                        Value::int(i as i64),
-                        arr.clone(),
-                    ]);
+                    acc = vm.call_value(
+                        &cb,
+                        &[acc, vals[i].clone(), Value::int(i as i64), arr.clone()],
+                    );
                 }
                 acc
             } else {
@@ -579,12 +598,10 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                 }
                 let last = if args.get(1).is_none() { n - 1 } else { n };
                 for i in (0..last).rev() {
-                    acc = vm.call_value(&cb, &[
-                        acc,
-                        vals[i].clone(),
-                        Value::int(i as i64),
-                        arr.clone(),
-                    ]);
+                    acc = vm.call_value(
+                        &cb,
+                        &[acc, vals[i].clone(), Value::int(i as i64), arr.clone()],
+                    );
                 }
                 acc
             } else {
@@ -601,13 +618,19 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                 let n = vals.len() as i64;
                 let to_i64 = |v: &Value| {
                     let x = v.to_number();
-                    if x.is_nan() { 0 } else { x.trunc() as i64 }
+                    if x.is_nan() {
+                        0
+                    } else {
+                        x.trunc() as i64
+                    }
                 };
                 let start = match args.first() {
                     Some(v) if v.is_undefined() => 0i64,
                     Some(v) => {
                         let mut s = to_i64(v);
-                        if s < 0 { s = (n + s).max(0); }
+                        if s < 0 {
+                            s = (n + s).max(0);
+                        }
                         s.min(n)
                     }
                     None => 0,
@@ -618,7 +641,8 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                     None => (n - start).max(0),
                 };
                 let items: Vec<Value> = args.iter().skip(2).cloned().collect();
-                let removed: Vec<Value> = vals.drain(start as usize..(start + del) as usize).collect();
+                let removed: Vec<Value> =
+                    vals.drain(start as usize..(start + del) as usize).collect();
                 for (j, it) in items.iter().enumerate() {
                     vals.insert((start + j as i64) as usize, it.clone());
                 }
@@ -642,7 +666,17 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                     Some(v) if v.is_undefined() => 1usize,
                     Some(v) => {
                         let x = v.to_number();
-                        if x.is_nan() { 0 } else if x.is_infinite() { if x > 0.0 { usize::MAX } else { 0 } } else { x.trunc().max(0.0) as usize }
+                        if x.is_nan() {
+                            0
+                        } else if x.is_infinite() {
+                            if x > 0.0 {
+                                usize::MAX
+                            } else {
+                                0
+                            }
+                        } else {
+                            x.trunc().max(0.0) as usize
+                        }
                     }
                     None => 1,
                 };
@@ -698,7 +732,11 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                 let i = match args.first() {
                     Some(v) => {
                         let x = v.to_number();
-                        if x.is_nan() { 0 } else { x.trunc() as i64 }
+                        if x.is_nan() {
+                            0
+                        } else {
+                            x.trunc() as i64
+                        }
                     }
                     None => 0,
                 };
@@ -724,15 +762,23 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                         Some(v) if v.is_undefined() => dflt,
                         Some(v) => {
                             let x = v.to_number();
-                            if x.is_nan() { 0 } else { x.trunc() as i64 }
+                            if x.is_nan() {
+                                0
+                            } else {
+                                x.trunc() as i64
+                            }
                         }
                         None => dflt,
                     }
                 };
                 let mut a = arg(1, 0);
                 let mut b = arg(2, n);
-                if a < 0 { a = (n + a).max(0); }
-                if b < 0 { b = (n + b).max(0); }
+                if a < 0 {
+                    a = (n + a).max(0);
+                }
+                if b < 0 {
+                    b = (n + b).max(0);
+                }
                 a = a.min(n);
                 b = b.min(n);
                 let mut vals = guard.to_values();
@@ -759,7 +805,11 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                         Some(v) if v.is_undefined() => dflt,
                         Some(v) => {
                             let x = v.to_number();
-                            if x.is_nan() { 0 } else { x.trunc() as i64 }
+                            if x.is_nan() {
+                                0
+                            } else {
+                                x.trunc() as i64
+                            }
                         }
                         None => dflt,
                     }
@@ -767,9 +817,15 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                 let mut t = arg(0, 0);
                 let mut a = arg(1, 0);
                 let mut b = arg(2, n);
-                if t < 0 { t = (n + t).max(0); }
-                if a < 0 { a = (n + a).max(0); }
-                if b < 0 { b = (n + b).max(0); }
+                if t < 0 {
+                    t = (n + t).max(0);
+                }
+                if a < 0 {
+                    a = (n + a).max(0);
+                }
+                if b < 0 {
+                    b = (n + b).max(0);
+                }
                 t = t.min(n);
                 a = a.min(n);
                 b = b.min(n);
@@ -840,7 +896,8 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                 let vals = ad.to_values();
                 drop(ad);
                 for i in (0..vals.len()).rev() {
-                    let r = vm.call_value(&cb, &[vals[i].clone(), Value::int(i as i64), arr.clone()]);
+                    let r =
+                        vm.call_value(&cb, &[vals[i].clone(), Value::int(i as i64), arr.clone()]);
                     if r.is_truthy() {
                         return vals[i].clone();
                     }
@@ -855,7 +912,8 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
                 let vals = ad.to_values();
                 drop(ad);
                 for i in (0..vals.len()).rev() {
-                    let r = vm.call_value(&cb, &[vals[i].clone(), Value::int(i as i64), arr.clone()]);
+                    let r =
+                        vm.call_value(&cb, &[vals[i].clone(), Value::int(i as i64), arr.clone()]);
                     if r.is_truthy() {
                         return Value::int(i as i64);
                     }
@@ -864,7 +922,10 @@ pub(crate) fn array_prop(obj: &Value, name: &str) -> Value {
             Value::int(-1)
         })),
         "\0sym_1" => Value::native(Arc::new(move |_args, _vm| {
-            let ad = arr.as_array().map(|a| a.borrow().to_values()).unwrap_or_default();
+            let ad = arr
+                .as_array()
+                .map(|a| a.borrow().to_values())
+                .unwrap_or_default();
             make_array_iterator(ad)
         })),
         _ => Value::undefined(),
@@ -985,18 +1046,16 @@ pub(crate) fn make_object_module() -> Value {
     let keys = Value::native(Arc::new(|args, vm| {
         let arg = args.first().cloned().unwrap_or(Value::undefined());
         match object_own_entries(&arg, vm) {
-            Some(entries) => Value::array(
-                entries.into_iter().map(|(k, _)| Value::string(k)).collect(),
-            ),
+            Some(entries) => {
+                Value::array(entries.into_iter().map(|(k, _)| Value::string(k)).collect())
+            }
             None => Value::undefined(),
         }
     }));
     let values = Value::native(Arc::new(|args, vm| {
         let arg = args.first().cloned().unwrap_or(Value::undefined());
         match object_own_entries(&arg, vm) {
-            Some(entries) => {
-                Value::array(entries.into_iter().map(|(_, v)| v).collect())
-            }
+            Some(entries) => Value::array(entries.into_iter().map(|(_, v)| v).collect()),
             None => Value::undefined(),
         }
     }));
@@ -1063,7 +1122,11 @@ pub(crate) fn make_object_module() -> Value {
                 let arr = arr.borrow();
                 if arr.len() > 0 {
                     let k = arr.get(0);
-                    let v = if arr.len() > 1 { arr.get(1) } else { Value::undefined() };
+                    let v = if arr.len() > 1 {
+                        arr.get(1)
+                    } else {
+                        Value::undefined()
+                    };
                     if let Some(id) = k.as_symbol() {
                         props.insert(format!("\0sym_{}", id), v);
                     } else {
