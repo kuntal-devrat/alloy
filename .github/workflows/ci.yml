@@ -93,4 +93,4 @@ jobs:
         run: cargo +nightly miri test -p alloy-runtime-core --test audit_hardening_tests
 
       - name: Run Miri on alloy-core unit tests
-        run: cargo +nightly miri test -p alloy-runtime-core --lib -- --skip startup_sweep --skip shm_
+        run: cargo +nightly miri test -p alloy-runtime-core --lib -- --skip shared_memory --skip backtracking_guard
