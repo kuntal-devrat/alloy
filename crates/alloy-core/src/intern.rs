@@ -138,7 +138,7 @@ pub fn atom_of(s: &str) -> Atom {
         }
     }
 
-    let mut guard = interner.write().unwrap_or_else(|g| g.into_inner());
+    let mut guard = interner.write().expect("interner RwLock poisoned");
     if let Some(&atom) = guard.map.get(s) {
         return atom;
     }
@@ -156,7 +156,7 @@ pub fn str_of(atom: Atom) -> String {
         return STATIC_STRINGS[idx].to_string();
     }
     let interner = get_interner();
-    let guard = interner.read().unwrap_or_else(|g| g.into_inner());
+    let guard = interner.read().expect("interner RwLock poisoned");
     if let Some(s) = guard.strings.get(idx) {
         s.clone()
     } else {
@@ -171,7 +171,7 @@ pub fn with_atom_str<R>(atom: Atom, f: impl FnOnce(&str) -> R) -> R {
         return f(STATIC_STRINGS[idx]);
     }
     let interner = get_interner();
-    let guard = interner.read().unwrap_or_else(|g| g.into_inner());
+    let guard = interner.read().expect("interner RwLock poisoned");
     if let Some(s) = guard.strings.get(idx) {
         f(s.as_str())
     } else {

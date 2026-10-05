@@ -74,14 +74,13 @@ impl Vm {
                 .iter()
                 .map(|t| t.when)
                 .fold(f64::INFINITY, f64::min);
-            let wait = ((next - now).max(0.0)).min(if pending_work { 2.0 } else { 1000.0 }) as u64;
+            let wait = ((next - now).max(0.0)).min(if pending_work { 10.0 } else { 1000.0 }) as u64;
             if wait > 0 {
-                if !self.cross_waiters.is_empty() {
-                    let _ = self
-                        .wake_rx
-                        .recv_timeout(std::time::Duration::from_millis(wait));
+                let dur = std::time::Duration::from_millis(wait);
+                if pending_work {
+                    let _ = self.wake_rx.recv_timeout(dur);
                 } else {
-                    std::thread::sleep(std::time::Duration::from_millis(wait));
+                    std::thread::sleep(dur);
                 }
             }
         }
@@ -342,7 +341,7 @@ impl Vm {
         } else {
             None
         };
-        let on_rejected = on_rejected.filter(&is_fn);
+        let on_rejected = on_rejected.filter(is_fn);
         let chained = self.new_promise_arc();
         let id = self.next_cont_id;
         self.next_cont_id += 1;

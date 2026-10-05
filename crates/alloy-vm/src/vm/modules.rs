@@ -277,7 +277,7 @@ impl Vm {
         if base.is_file() {
             return Some(canon(base));
         }
-        for ext in ["ajs", "ax", "js", "json"] {
+        for ext in ["ajs", "ax", "js", "ts", "tsx", "json"] {
             let p = base.with_extension(ext);
             if p.is_file() {
                 return Some(canon(&p));
@@ -291,7 +291,14 @@ impl Vm {
                     return Some(found);
                 }
             }
-            for name in ["index.ajs", "index.ax", "index.js", "index.json"] {
+            for name in [
+                "index.ajs",
+                "index.ax",
+                "index.js",
+                "index.ts",
+                "index.tsx",
+                "index.json",
+            ] {
                 let p = base.join(name);
                 if p.is_file() {
                     return Some(canon(&p));
@@ -602,8 +609,11 @@ impl Vm {
                 .map(Arc::from)
                 .map_err(|e| format!("internal error: cannot serialize '{}': {}", requested, e))
         } else {
-            let src = String::from_utf8(bytes)
+            let mut src = String::from_utf8(bytes)
                 .map_err(|_| format!("SyntaxError: '{}' is not valid UTF-8 source", requested))?;
+            if canon.ends_with(".ts") || canon.ends_with(".tsx") {
+                src = crate::compiler::strip_typescript(&src);
+            }
             let p = Compiler::compile_module(&src)
                 .map_err(|e| format!("SyntaxError: failed to compile '{}': {}", requested, e))?;
             p.to_bytes()

@@ -356,8 +356,8 @@ fn ensure_ctrlc_cleanup_installed() {
             cleanup_active_segments();
             libc::_exit(130);
         }
-        libc::signal(libc::SIGINT, sig_handler as _);
-        libc::signal(libc::SIGTERM, sig_handler as _);
+        libc::signal(libc::SIGINT, sig_handler as *const () as _);
+        libc::signal(libc::SIGTERM, sig_handler as *const () as _);
     }
 }
 

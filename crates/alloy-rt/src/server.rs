@@ -98,11 +98,21 @@ fn parse_request(buf: &[u8]) -> Option<(HttpRequest, usize)> {
     ))
 }
 
-fn build_response(status: u16, reason: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+fn build_response(
+    status: u16,
+    reason: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    keep_alive: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status, reason).as_bytes());
     out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-    out.extend_from_slice(b"Connection: keep-alive\r\n");
+    if keep_alive {
+        out.extend_from_slice(b"Connection: keep-alive\r\n");
+    } else {
+        out.extend_from_slice(b"Connection: close\r\n");
+    }
     for (k, v) in headers {
         out.extend_from_slice(format!("{}: {}\r\n", k, v).as_bytes());
     }
@@ -159,7 +169,9 @@ impl HttpServer {
 
         loop {
             let (mut stream, addr) = listener.accept().await?;
-            eprintln!("[alloy] connection from {}", addr);
+            if std::env::var_os("ALLOY_TRACE").is_some() {
+                eprintln!("[alloy] connection from {}", addr);
+            }
             let typed = typed.clone();
             let raw = raw.clone();
             let cfg = cfg.clone();
@@ -184,13 +196,20 @@ impl HttpServer {
                                 "OK",
                                 &[("Content-Type", "text/plain")],
                                 b"Hello, alloy!",
+                                cfg.keep_alive,
                             )
                         };
                         // Ensure response is framed; if handler returned only body, frame it
                         let framed = if response.starts_with(b"HTTP/") {
                             response
                         } else {
-                            build_response(200, "OK", &[("Content-Type", "text/plain")], &response)
+                            build_response(
+                                200,
+                                "OK",
+                                &[("Content-Type", "text/plain")],
+                                &response,
+                                cfg.keep_alive,
+                            )
                         };
                         if timeout(cfg.write_timeout, stream.write_all(&framed))
                             .await
@@ -218,18 +237,25 @@ impl HttpServer {
 
                     // Check size limits on unparsed data
                     if buf.len() > cfg.max_header_bytes + cfg.max_body_bytes {
-                        let resp =
-                            build_response(413, "Payload Too Large", &[], b"Payload Too Large");
+                        let resp = build_response(
+                            413,
+                            "Payload Too Large",
+                            &[],
+                            b"Payload Too Large",
+                            false,
+                        );
                         let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
                         break 'conn;
                     }
-                    if buf.len() > cfg.max_header_bytes && !buf.windows(4).any(|w| w == b"\r\n\r\n")
+                    if buf.len() > cfg.max_header_bytes
+                        && !buf.windows(4).any(|w| w == b"\r\n\r\n")
                     {
                         let resp = build_response(
                             431,
                             "Request Header Fields Too Large",
                             &[],
                             b"Header Too Large",
+                            false,
                         );
                         let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
                         break 'conn;

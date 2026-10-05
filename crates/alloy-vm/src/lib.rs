@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod jit;
 pub mod lsp;
 pub mod opcode;
+pub mod permissions;
 pub mod python_embed;
 pub mod python_sidecar;
 pub mod sourcemap;
@@ -11,5 +12,6 @@ pub mod vm;
 
 pub use bytecode::Program;
 pub use compiler::Compiler;
+pub use permissions::Permissions;
 pub use sourcemap::SourceMap;
 pub use vm::Vm;

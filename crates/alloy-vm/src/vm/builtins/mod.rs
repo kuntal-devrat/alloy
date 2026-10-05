@@ -1154,6 +1154,10 @@ pub(crate) fn make_fs_module() -> Value {
                 return Value::undefined();
             }
         };
+        if let Err(e) = vm.check_read_permission(&path) {
+            vm.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         match std::fs::read_to_string(&path) {
             Ok(s) => Value::string(s),
             Err(e) => {
@@ -1172,6 +1176,10 @@ pub(crate) fn make_fs_module() -> Value {
                 return Value::bool(false);
             }
         };
+        if let Err(e) = vm.check_write_permission(&path) {
+            vm.throw_exception(Value::string(e));
+            return Value::bool(false);
+        }
         let text = match data.as_str() {
             Some(s) => s.to_string(),
             None => format!("{}", data),
@@ -1184,8 +1192,16 @@ pub(crate) fn make_fs_module() -> Value {
             }
         }
     }));
-    let exists = Value::native(Arc::new(|args, _vm| {
-        let ok = matches!(args.first().and_then(|v| v.as_str()), Some(p) if std::path::Path::new(p).exists());
+    let exists = Value::native(Arc::new(|args, vm| {
+        let p = match args.first().and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Value::bool(false),
+        };
+        if let Err(e) = vm.check_read_permission(p) {
+            vm.throw_exception(Value::string(e));
+            return Value::bool(false);
+        }
+        let ok = std::path::Path::new(p).exists();
         Value::bool(ok)
     }));
     let unlink = Value::native(Arc::new(|args, vm| {
@@ -1196,6 +1212,10 @@ pub(crate) fn make_fs_module() -> Value {
                 return Value::undefined();
             }
         };
+        if let Err(e) = vm.check_write_permission(&path) {
+            vm.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         match std::fs::remove_file(&path) {
             Ok(_) => Value::undefined(),
             Err(e) => {
@@ -1212,6 +1232,10 @@ pub(crate) fn make_fs_module() -> Value {
                 return Value::undefined();
             }
         };
+        if let Err(e) = vm.check_write_permission(&path) {
+            vm.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         let recursive = args.get(1).and_then(|o| o.as_object()).is_none_or(|obj| {
             obj.borrow()
                 .get("recursive")
@@ -1239,6 +1263,10 @@ pub(crate) fn make_fs_module() -> Value {
                 return Value::undefined();
             }
         };
+        if let Err(e) = vm.check_read_permission(&path) {
+            vm.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         match std::fs::read_dir(&path) {
             Ok(entries) => {
                 let mut names = Vec::new();
@@ -1261,6 +1289,10 @@ pub(crate) fn make_fs_module() -> Value {
                 return Value::undefined();
             }
         };
+        if let Err(e) = vm.check_read_permission(&path) {
+            vm.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         match std::fs::metadata(&path) {
             Ok(meta) => {
                 let is_file = meta.is_file();
@@ -1297,6 +1329,14 @@ pub(crate) fn make_fs_module() -> Value {
                 return Value::undefined();
             }
         };
+        if let Err(e) = vm.check_read_permission(&src) {
+            vm.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
+        if let Err(e) = vm.check_write_permission(&dst) {
+            vm.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         match std::fs::copy(&src, &dst) {
             Ok(_) => Value::undefined(),
             Err(e) => {
@@ -1306,13 +1346,22 @@ pub(crate) fn make_fs_module() -> Value {
         }
     }));
     let mut m = HashMap::new();
+    m.insert("readFile".to_string(), read_file.clone());
     m.insert("readFileSync".to_string(), read_file);
+    m.insert("writeFile".to_string(), write_file.clone());
     m.insert("writeFileSync".to_string(), write_file);
+    m.insert("exists".to_string(), exists.clone());
     m.insert("existsSync".to_string(), exists);
-    m.insert("unlinkSync".to_string(), unlink);
+    m.insert("unlink".to_string(), unlink.clone());
+    m.insert("unlinkSync".to_string(), unlink.clone());
+    m.insert("rmSync".to_string(), unlink);
+    m.insert("mkdir".to_string(), mkdir.clone());
     m.insert("mkdirSync".to_string(), mkdir);
+    m.insert("readdir".to_string(), readdir.clone());
     m.insert("readdirSync".to_string(), readdir);
+    m.insert("stat".to_string(), stat.clone());
     m.insert("statSync".to_string(), stat);
+    m.insert("copyFile".to_string(), copy_file.clone());
     m.insert("copyFileSync".to_string(), copy_file);
     Value::object(m)
 }

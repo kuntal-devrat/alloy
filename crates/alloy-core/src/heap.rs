@@ -140,11 +140,10 @@ impl ArenaHeap {
         match self.try_promote_box(addr) {
             Some(p) => p,
             None => {
-                eprintln!(
-                    "[alloy] promote_box: no region record for {:#x} — returning null sentinel",
+                panic!(
+                    "[alloy] promote_box: no region record for {:#x} — cannot promote",
                     addr
                 );
-                0
             }
         }
     }

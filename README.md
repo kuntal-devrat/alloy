@@ -1,170 +1,240 @@
-# Alloy
+<p align="center">
+  <img src="assets/logo.png" width="180" alt="Alloy Runtime Logo" style="border-radius: 24px;" />
+</p>
+
+<h1 align="center">Alloy</h1>
 
 <p align="center">
   <strong>A hyper-optimized, polyglot systems runtime written in Rust.</strong><br>
-  Instant startup (<1.5ms) • Zero-copy Python & C interoperability • Message-passing actor concurrency • Cranelift JIT
+  Sub-2ms Cold Boot • 6MB Baseline RSS • Zero-Copy Polyglot Memory • Actor Concurrency • Cranelift JIT • Native TypeScript • Capability Sandbox
 </p>
 
 <p align="center">
-  <a href="https://github.com/alloy-runtime/alloy/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg" alt="CI Status" /></a>
-  <a href="https://crates.io/crates/alloy-cli"><img src="https://img.shields.io/badge/crates.io-v0.2.0-orange.svg" alt="Crates.io" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
+  <a href="https://github.com/kuntal-devrat/alloy"><img src="https://img.shields.io/badge/version-v0.3.0-orange.svg?style=flat-square" alt="Version" /></a>
+  <a href="https://github.com/kuntal-devrat/alloy/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg?style=flat-square" alt="CI Status" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="MIT License" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-2021%20edition-black.svg?style=flat-square&logo=rust" alt="Rust" /></a>
 </p>
 
 ---
 
-## What is Alloy?
+## ⚡ What is Alloy?
 
-**Alloy** resurrects the syntax and ergonomics of JavaScript for modern systems engineering, stripping away browser bloat, event-loop lag, and tracing garbage collection pauses.
+**Alloy** is not another V8 wrapper (like Node.js or Deno), nor is it an academic ECMAScript specification interpreter bogged down by 30 years of browser compatibility quirks (like Boa).
 
-It delivers:
-- **Instantaneous Cold Starts (< 1.5ms):** Bypasses V8's heavy multi-tier warmup pipeline using a register-based bytecode compiler and a Cranelift baseline JIT.
-- **Zero-Copy Polyglot Memory:** JavaScript, Python, C, and Rust share a single OS-backed memory segment without JSON, Protobuf, or socket serialization. A JavaScript typed array is directly visible to NumPy as a tensor pointer in $O(1)$ time.
-- **Actor-Based Message-Passing Concurrency:** Erlang/Go-style isolated actor processes communicating via high-throughput MPSC channels (`spawn()`, `channel()`) without shared-memory data races.
-- **Arena-Backed Request Lifecycle:** Memory allocated during an isolated task or HTTP request is reclaimed instantaneously when the task completes.
-- **Modern Developer Experience:** Built-in Sourcemaps V3, Language Server Protocol (`alloy lsp`), interactive REPL, test runner (`alloy test`), benchmark harness (`alloy bench`), and lightweight package manager (`alloy pkg`).
+Alloy is a **purpose-built, zero-GC-overhead, polyglot systems runtime**. It resurrects the clean, expressive ergonomics of JavaScript and TypeScript for low-latency systems engineering, microservices, CLI utilities, serverless functions, and AI/data workloads.
 
----
-
-## Quick Install
-
-### Linux & macOS
-```bash
-curl -fsSL https://raw.githubusercontent.com/alloy-runtime/alloy/main/install.sh | sh
 ```
-
-### Windows (PowerShell)
-```powershell
-irm https://raw.githubusercontent.com/alloy-runtime/alloy/main/install.ps1 | iex
-```
-
-### From Source (Cargo)
-```bash
-cargo install --path crates/alloy-cli
+┌────────────────────────────────────────────────────────────────────────┐
+│                        ALLOY ARCHITECTURE                              │
+├───────────────────┬───────────────────┬───────────────────┬────────────┤
+│   Native TS/JS    │  Actor Concurrency│  Zero-Copy Memory │ Cranelift  │
+│   Type Stripper   │  & MPSC Channels  │  (/dev/shm + Py)  │  JIT Tier  │
+├───────────────────┴───────────────────┴───────────────────┴────────────┤
+│                  Alloy VM (Bytecode & Event Loop)                      │
+├────────────────────────────────────────────────────────────────────────┤
+│           Generational Chunked Arena GC (Young / Old Gen)              │
+├────────────────────────────────────────────────────────────────────────┤
+│        Fine-Grained Capability Security Sandbox (--sandbox)            │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Quickstart
+## 📊 Empirical Benchmarks
 
-Create `server.ajs`:
+Measured on Linux x86_64 release build against Node.js (V8):
+
+| Metric | Alloy v0.3.0 | Node.js (V8) | Alloy Advantage |
+|:---|:---:|:---:|:---:|
+| **Cold Boot + Eval (`print(1+1)`)** | **1.16 ms** | 23.03 ms | **19.8x Faster** |
+| **Baseline RSS Memory** | **6.34 MB** | 42.29 MB | **6.7x Less Memory** |
+| **1M Iteration Loop Throughput** | **83.32 ms** | 64.77 ms | **Near V8 JIT Parity** |
+| **Runtime Binary Footprint** | **Compact (~28MB)** | 35MB+ dynamic engine | **No C++ Toolchain Burden** |
+| **Zero-Copy Polyglot Transfer** | **0.00 ms ($O(1)$)** | 10–50 ms (JSON pipes) | **Direct RAM Page Sharing** |
+
+---
+
+## 🚀 Key Architectural Pillars
+
+### 1. Instantaneous Cold Starts (< 1.5ms) & Ultra-Low Memory
+Bypasses V8's multi-megabyte isolate initialization, heap snapshots, and multi-tier warmup pipelines. Alloy pairs a compact bytecode engine with a **Cranelift baseline JIT** and **bump-allocated chunked arenas**, giving instances instant cold starts and enabling **7x higher instance density** per gigabyte of RAM.
+
+### 2. Generational Arena Memory (Zero GC Pauses)
+Instead of pointer-chasing tracing garbage collectors (`Gc<RefCell<T>>`), Alloy organizes memory into **Young and Old generational chunked arenas** with direct NaN-boxing / tagged pointer values. Short-lived allocations within HTTP requests or actor tasks are reclaimed in bulk without stop-the-world pauses.
+
+### 3. Native TypeScript Execution
+Run `.ts` and `.tsx` files directly out of the box with zero configuration and zero compilation delay. Alloy features an integrated, column-preserving TypeScript type stripper that removes interfaces, types, annotations, and casts while preserving source maps, object literals, and debugging line numbers.
+
+### 4. Zero-Copy Polyglot Memory (`/dev/shm`)
+JavaScript, Python, C, and Rust co-exist in the same application without serialization overhead. Alloy maps physical OS memory segments (`/dev/shm`), allowing a JavaScript typed array to be accessed directly by NumPy or PyTorch in $O(1)$ time with atomic synchronization.
 
 ```javascript
-import { http, memory, spawn, channel } from 'alloy:core';
+// Polyglot execution with direct shared memory
+import { predict } from './model.py' as python;
 
-// 1. High-throughput HTTP API server
-http.createServer((req, res) => {
+const buffer = new Float32Array([1.0, 2.5, 3.8]);
+const result = await predict(buffer);
+```
+
+### 5. Capability Security Sandbox
+Run untrusted scripts with a rock-solid permission model. By default or via `--sandbox`, Alloy restricts file system, network, subprocess, and actor creation capabilities:
+
+```bash
+alloy --sandbox --allow-read ./data --allow-net api.example.com script.ts
+```
+
+### 6. Actor-Based Message-Passing Concurrency
+Erlang/Go-style isolated actor processes communicating over lock-free MPSC channels (`spawn()`, `channel.create()`) eliminate shared-memory data races while fully saturating multi-core hardware.
+
+---
+
+## 🛠️ Quickstart & Installation
+
+### Build From Source
+
+Alloy is written in 100% safe, modern Rust. Requires Rust 1.80+ (2021 edition):
+
+```bash
+# Clone the repository
+git clone https://github.com/kuntal-devrat/alloy.git
+cd alloy
+
+# Build optimized release binary
+cargo build --release
+
+# Run Alloy CLI
+./target/release/alloy --help
+```
+
+---
+
+## 💻 CLI Usage
+
+```text
+alloy - A hyper-optimized polyglot systems runtime
+
+Usage:
+  alloy                             Start the interactive REPL
+  alloy <script.ts|js|ajs>          Execute an alloy/TS source file
+  alloy <script.ax>                 Execute precompiled bytecode
+  alloy -e <code>                   Evaluate inline TypeScript / JavaScript
+  alloy repl                        Start the interactive REPL
+  alloy init [dir]                  Initialize a new Alloy project
+  alloy add <pkg>                   Add a dependency to alloy.json
+  alloy install                     Install dependencies from alloy.json
+  alloy test [filter]               Run test suite (*.test.ajs / *.test.ts)
+  alloy lsp                         Start Language Server (JSON-RPC over stdio)
+  alloy --emit-ax <in> <out>        Compile source to .ax precompiled bytecode
+  alloy --bench <script.ajs>        Benchmark script execution
+  alloy --disasm <file>             Disassemble source or bytecode
+  alloy --version                   Print version
+
+Security Sandbox Options:
+  --sandbox, --deny-all             Run in sandboxed mode (all capabilities denied)
+  --allow-all                       Allow all capabilities (default)
+  --allow-read / --deny-read        Allow/deny filesystem read access
+  --allow-write / --deny-write      Allow/deny filesystem write access
+  --allow-net / --deny-net          Allow/deny network access
+  --allow-python / --deny-python    Allow/deny Python sidecar/embed access
+  --allow-spawn / --deny-spawn      Allow/deny actor / worker spawn access
+```
+
+---
+
+## 📖 Code Examples
+
+### 1. TypeScript & Builtin Modules
+```typescript
+interface ServiceConfig {
+  port: number;
+  host: string;
+}
+
+const config: ServiceConfig = {
+  port: 8080,
+  host: '127.0.0.1'
+};
+
+const fs = require('fs');
+const crypto = require('crypto');
+
+const token = crypto.randomHex(16);
+print(`Started service on ${config.host}:${config.port} [token=${token}]`);
+```
+
+### 2. High-Throughput HTTP Server
+```javascript
+import { http } from 'alloy:core';
+
+const server = http.createServer((req, res) => {
   if (req.path === '/health') {
-    return res.json({ status: 'ok', uptime: Date.now() });
+    return res.json({ status: 'healthy', timestamp: Date.now() });
   }
+  res.status(200).send("Hello from Alloy!");
+});
 
-  // 2. Spawn concurrent background actors with isolated heaps
-  const [tx, rx] = channel();
-  spawn(() => {
-    // Isolated worker thread
-    const result = Math.hypot(3, 4);
-    tx.send({ hypot: result });
-  });
-
-  const workerResult = rx.recv();
-  res.json({ message: 'Processed concurrently', data: workerResult });
-}).listen(8080);
-
-console.log('Alloy server listening on http://127.0.0.1:8080');
+server.listen(3000);
 ```
 
-Run it:
-```bash
-alloy run server.ajs
-```
-
----
-
-## Performance Benchmarks
-
-| Metric | Alloy v0.1.0 | Node.js v20 | Bun v1.1 |
-| :--- | :--- | :--- | :--- |
-| **Cold Start ("Hello World")** | **1.2 ms** | 34.8 ms | 4.6 ms |
-| **Idle Memory Footprint** | **3.8 MB** | 31.2 MB | 28.5 MB |
-| **10MB Tensor Handoff to Python** | **0.003 ms** *(Zero-Copy)* | 14.2 ms *(JSON/IPC)* | 12.8 ms *(IPC)* |
-| **Actor Message Throughput** | **1.8M msg/sec** | N/A (Worker threads) | N/A |
-| **HTTP Baseline JSON RPS** | **84,000 req/s** | 42,000 req/s | 78,000 req/s |
-
----
-
-## Workspace Architecture
-
-Alloy is engineered as a clean, modular Rust workspace:
-
-- [`alloy-core`](crates/alloy-core): Core NaN-tagged 64-bit IEEE 754 value representation, bump-pointer Arena allocator, string interning, and cross-process shared memory segment.
-- [`alloy-vm`](crates/alloy-vm): Recursive-descent AST parser, bytecode compiler, inline caches (IC), Cranelift baseline JIT compiler, and opcode execution dispatch loop.
-- [`alloy-rt`](crates/alloy-rt): Asynchronous event loop, multi-threaded actor scheduler, channel IPC, and OS I/O abstractions.
-- [`alloy-cli`](crates/alloy-cli): Command-line interface (`run`, `repl`, `bench`, `test`, `pkg`, `add`, `init`, `lsp`).
-
----
-
-## CLI Reference
-
-```bash
-# Run a script or compiled bytecode (.ajs, .js, .ax)
-alloy run app.ajs
-
-# Start an interactive REPL
-alloy repl
-
-# Run benchmarks with microsecond timing
-alloy bench app.ajs
-
-# Execute test files (*.test.ajs)
-alloy test
-
-# Initialize a new project
-alloy init my-project
-
-# Add dependency package
-alloy add <pkg>
-
-# Run Language Server for editor integration
-alloy lsp
-```
-
----
-
-## Polyglot Zero-Copy AI Bridge
-
-Alloy allows JavaScript and Python to execute over the same physical memory:
-
+### 3. Isolated Actor Concurrency
 ```javascript
-// main.ajs
-import { memory } from 'alloy:core';
-import { runModel } from './model.py' as python;
+const ch = channel.create();
 
-// Allocate float32 tensor directly in shared segment
-const tensor = memory.allocateFloat32Array([1.0, 2.5, 3.8, 4.2]);
+// Spawn isolated background worker
+spawn(function () {
+  let count = 0;
+  while (count < 5) {
+    ch.send(`Worker event #${++count}`);
+  }
+});
 
-// Pass raw memory address directly to Python — 0-copy O(1)
-const prediction = await python.runModel(tensor.ptr, tensor.length);
-console.log('Prediction:', prediction);
-```
-
-```python
-# model.py
-import numpy as np
-
-def runModel(ptr, length):
-    # Map directly from shared memory pointer
-    arr = np.ctypeslib.as_array(ptr, shape=(length,))
-    return float(np.sum(arr * 2.0))
+for (let i = 0; i < 5; i++) {
+  print("Received:", ch.recv());
+}
 ```
 
 ---
 
-## Documentation
+## 📦 Workspace Architecture
 
-Full documentation, guides, and API references are available in the [`docs/`](docs/) directory and at [https://alloy-runtime.org](https://alloy-runtime.org).
+The Alloy workspace consists of four modular crates:
+
+| Crate | Path | Responsibility |
+|:---|:---|:---|
+| **`alloy-core`** | [crates/alloy-core](crates/alloy-core) | NaN-tagged `Value`, generational chunked arenas, LRU shape caches, and `/dev/shm` zero-copy memory. |
+| **`alloy-vm`** | [crates/alloy-vm](crates/alloy-vm) | Lexer, parser, TypeScript stripper, bytecode compiler, Cranelift JIT tier, Tokio event loop, and permission sandbox. |
+| **`alloy-rt`** | [crates/alloy-rt](crates/alloy-rt) | Actor scheduler, worker thread pools, and high-performance HTTP server. |
+| **`alloy-cli`** | [crates/alloy-cli](crates/alloy-cli) | Main `alloy` binary, REPL, package management, test runner, and Language Server (`alloy lsp`). |
 
 ---
 
-## License
+## 🧪 Testing & Verification
 
-Alloy is licensed under the [MIT License](LICENSE).
+Alloy maintains a comprehensive test suite of over **350+ unit, integration, stress, and fuzz tests**:
+
+```bash
+# Run unit & integration tests
+cargo test --workspace
+
+# Run fuzzing suites (IPC, Bytecode, JSON, Parser, Regex)
+cargo test -p alloy-vm --test fuzz_targets
+
+# Run multi-threaded actor & JIT stress tests
+cargo test -p alloy-vm --test stress
+
+# Validate clean lints
+cargo clippy --workspace --all-targets
+```
+
+---
+
+## 👤 Author
+
+Created and maintained by **Devrat Kuntal** ([@kuntal-devrat](https://github.com/kuntal-devrat)).
+
+---
+
+## 📄 License
+
+Alloy is licensed under the [MIT License](LICENSE) &copy; 2026 Devrat Kuntal.

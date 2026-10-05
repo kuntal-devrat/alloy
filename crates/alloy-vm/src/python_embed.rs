@@ -1199,7 +1199,7 @@ impl EmbedPython {
         // Defensive: never underflow (a stray late Drop after finalization
         // must not wedge the guard at usize::MAX).
         let _ =
-            LIVE_BACKENDS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+            LIVE_BACKENDS.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
     }
 }
 

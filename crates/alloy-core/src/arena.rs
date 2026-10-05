@@ -193,6 +193,8 @@ pub struct ChunkedArena {
     /// GC barrier on every box write. `Cell` so the barrier can mark through
     /// `&self`. Sized to the chunk's capacity at chunk creation.
     dirty: Vec<Vec<Cell<u64>>>,
+    min_addr: usize,
+    max_addr: usize,
 }
 
 /// Size-class mapping for the segregated free list. Classes grow denser at
@@ -232,6 +234,8 @@ impl ChunkedArena {
             free_bins: Vec::new(),
             regions: Vec::new(),
             dirty: Vec::new(),
+            min_addr: usize::MAX,
+            max_addr: 0,
         };
         s.push_chunk(chunk_size);
         s
@@ -241,8 +245,13 @@ impl ChunkedArena {
     /// table and a dirty bitmap sized to its capacity.
     fn push_chunk(&mut self, cap: usize) {
         let cap = cap.max(self.chunk_size);
-        self.chunks.push(Arena::new(cap));
-        self.regions.push(Vec::new());
+        let arena = Arena::new(cap);
+        let base = arena.ptr() as usize;
+        self.min_addr = self.min_addr.min(base);
+        self.max_addr = self.max_addr.max(base + cap);
+        self.chunks.push(arena);
+        // Pre-allocate region table capacity based on expected box count (OPT-06)
+        self.regions.push(Vec::with_capacity((cap >> 5).max(64)));
         // One bit per 8-byte slot: (cap >> 3) slots, 64 per u64 cell.
         self.dirty
             .push(vec![Cell::new(0u64); (cap >> 3).div_ceil(64)]);
@@ -372,7 +381,10 @@ impl ChunkedArena {
                         continue;
                     }
                     // Locate the parent's region record (it is KIND_FREE).
-                    let (chunk_i, slot) = self.chunk_of(addr);
+                    let (chunk_i, slot) = match self.try_chunk_of(addr) {
+                        Some(cs) => cs,
+                        None => continue,
+                    };
                     let rem = p - rsize;
                     let regions = &mut self.regions[chunk_i];
                     let idx = regions.partition_point(|r| r.slot < slot as u32);
@@ -428,24 +440,9 @@ impl ChunkedArena {
         }
         None
     }
-    fn chunk_of(&self, addr: usize) -> (usize, usize) {
-        match self.try_chunk_of(addr) {
-            Some(v) => v,
-            None => {
-                // Debug builds: loud crash so the bug is caught immediately.
-                debug_assert!(
-                    false,
-                    "[alloy] address {:#x} not in any arena chunk — GC would corrupt chunk 0",
-                    addr
-                );
-                // Release builds: log and return a sentinel that sweep callers
-                // must check. Using (usize::MAX, 0) so no real chunk index
-                // can match — callers that destructure blindly will
-                // bounds-check fail rather than silently corrupt.
-                eprintln!("[alloy] address not in arena: {:#x}", addr);
-                (usize::MAX, 0)
-            }
-        }
+    #[inline]
+    fn chunk_of(&self, addr: usize) -> Option<(usize, usize)> {
+        self.try_chunk_of(addr)
     }
 
     /// Mark-sweep reclamation: walk the arena linearly, call `on_dead(addr,
@@ -602,7 +599,11 @@ impl ChunkedArena {
 
     /// Does `addr` fall inside an allocated region of any chunk? (Used by the
     /// escape-analysis pass to tell young-arena values from promoted ones.)
+    #[inline]
     pub fn contains(&self, addr: usize) -> bool {
+        if addr < self.min_addr || addr >= self.max_addr {
+            return false;
+        }
         self.chunks.iter().take(self.active + 1).any(|c| {
             let base = c.ptr() as usize;
             addr >= base && addr < base + c.used()

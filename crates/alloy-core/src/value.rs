@@ -717,26 +717,23 @@ impl ArrayData {
             ArrayData::Ints(vs) => {
                 if vs.is_empty() {
                     Value::undefined()
-                } else if vs.len() > 64 {
-                    // For large packed arrays, memmove via Vec::drain is faster than remove(0) loop
-                    let v = vs[0];
-                    vs.rotate_left(1);
-                    vs.truncate(vs.len() - 1);
-                    Value::int(v)
                 } else {
-                    Value::int(vs.remove(0))
+                    let v = vs.remove(0);
+                    if vs.capacity() > 128 && vs.len() < vs.capacity() / 4 {
+                        vs.shrink_to(vs.capacity() / 2);
+                    }
+                    Value::int(v)
                 }
             }
             ArrayData::Values(vs) => {
                 if vs.is_empty() {
                     Value::undefined()
-                } else if vs.len() > 64 {
-                    let v = vs[0].clone();
-                    vs.rotate_left(1);
-                    vs.truncate(vs.len() - 1);
-                    v
                 } else {
-                    vs.remove(0)
+                    let v = vs.remove(0);
+                    if vs.capacity() > 128 && vs.len() < vs.capacity() / 4 {
+                        vs.shrink_to(vs.capacity() / 2);
+                    }
+                    v
                 }
             }
         }
@@ -886,39 +883,77 @@ pub struct Shape {
     pub(crate) map: hashbrown::HashMap<crate::intern::Atom, u32>,
     pub(crate) insertion_order: Vec<crate::intern::Atom>,
     pub(crate) names: Vec<String>,
+    pub(crate) sorted_names: Vec<String>,
 }
 
-// Thread-local shape transition cache: `(parent_ptr, atom, offset) -> shape`.
-// Bounded (1024 entries) so long-running servers can't grow it without bound.
+// Thread-local shape transition cache: `(parent_ptr, atom, offset) -> (shape, lru_clock)`.
+// Bounded (1024 entries) with LRU eviction so hot shapes persist across runs.
 // Guards the O(N) map clone in `ObjectData::set`. Thread-local because shapes
 // are `Rc` (not `Sync`); each VM thread builds its own hot shapes.
 thread_local! {
-    static TRANSITIONS: std::cell::RefCell<hashbrown::HashMap<(u64, crate::intern::Atom, u32), Rc<Shape>>> = std::cell::RefCell::new(hashbrown::HashMap::new());
+    static TRANSITION_CLOCK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TRANSITIONS: std::cell::RefCell<hashbrown::HashMap<(u64, crate::intern::Atom, u32), (Rc<Shape>, u64)>> = std::cell::RefCell::new(hashbrown::HashMap::new());
 }
+
+fn next_transition_clock() -> u64 {
+    TRANSITION_CLOCK.with(|c| {
+        let val = c.get().wrapping_add(1);
+        c.set(val);
+        val
+    })
+}
+
 fn shape_transition_lookup(
     parent: u64,
     atom: crate::intern::Atom,
     offset: u32,
 ) -> Option<Rc<Shape>> {
     TRANSITIONS
-        .try_with(|t| t.borrow().get(&(parent, atom, offset)).cloned())
+        .try_with(|t| {
+            let mut g = t.borrow_mut();
+            if let Some((shape, clock)) = g.get_mut(&(parent, atom, offset)) {
+                *clock = next_transition_clock();
+                Some(shape.clone())
+            } else {
+                None
+            }
+        })
         .ok()
         .flatten()
 }
+
 fn shape_transition_insert(parent: u64, atom: crate::intern::Atom, offset: u32, shape: Rc<Shape>) {
     let _ = TRANSITIONS.try_with(|t| {
         let mut g = t.borrow_mut();
         if g.len() >= 1024 {
-            let drop_keys: Vec<_> = g.keys().take(256).cloned().collect();
-            for k in drop_keys {
+            let mut entries: Vec<((u64, crate::intern::Atom, u32), u64)> =
+                g.iter().map(|(k, (_, clk))| (*k, *clk)).collect();
+            entries.sort_unstable_by_key(|(_, clk)| *clk);
+            for (k, _) in entries.into_iter().take(256) {
                 g.remove(&k);
             }
         }
-        g.insert((parent, atom, offset), shape);
+        let now = next_transition_clock();
+        g.insert((parent, atom, offset), (shape, now));
     });
 }
 
 impl Shape {
+    pub fn new(
+        map: hashbrown::HashMap<crate::intern::Atom, u32>,
+        insertion_order: Vec<crate::intern::Atom>,
+        names: Vec<String>,
+    ) -> Self {
+        let mut sorted_names = names.clone();
+        sorted_names.sort();
+        Self {
+            map,
+            insertion_order,
+            names,
+            sorted_names,
+        }
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.names.len()
@@ -949,12 +984,10 @@ impl Shape {
     }
 
     /// Property names in deterministic (sorted) order, for GetKeys and
-    /// serialization. (Hash maps are unordered; the old object storage sorted
-    /// keys for GetKeys and serialization already depended on ordering.)
+    /// serialization. Cached at construction to avoid O(N log N) sort per access.
+    #[inline]
     pub fn keys_sorted(&self) -> Vec<&String> {
-        let mut keys: Vec<&String> = self.names.iter().collect();
-        keys.sort();
-        keys
+        self.sorted_names.iter().collect()
     }
 
     /// Property names in JS *insertion* order (offsets are assigned in
@@ -1072,11 +1105,7 @@ impl ObjectData {
                     insertion_order.push(atom);
                     let mut names = self.shape.names.clone();
                     names.push(crate::intern::str_of(atom));
-                    let fresh = Rc::new(Shape {
-                        map,
-                        insertion_order,
-                        names,
-                    });
+                    let fresh = Rc::new(Shape::new(map, insertion_order, names));
                     shape_transition_insert(parent, atom, o, fresh.clone());
                     self.shape = fresh;
                 }
@@ -1341,6 +1370,31 @@ pub trait VmHost {
     /// catches it exactly like `throw exc`; otherwise it becomes the VM's
     /// uncaught exception. Default: no-op.
     fn throw_exception(&mut self, _exc: Value) {}
+
+    /// Check read permission for a path. Default: allow.
+    fn check_read_permission(&mut self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Check write permission for a path. Default: allow.
+    fn check_write_permission(&mut self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Check network permission for a target host/url. Default: allow.
+    fn check_net_permission(&mut self, _target: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Check Python sidecar/embed execution permission. Default: allow.
+    fn check_python_permission(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Check actor / worker spawn permission. Default: allow.
+    fn check_spawn_permission(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Invoke `func` in the Python sidecar serving `src`, with `args`
     /// translated onto the wire (shared-segment pointers become offsets).
@@ -1676,11 +1730,7 @@ impl Value {
         }
         let n = values.len();
         let od = ObjectData {
-            shape: Rc::new(Shape {
-                map: shape_map,
-                insertion_order,
-                names,
-            }),
+            shape: Rc::new(Shape::new(shape_map, insertion_order, names)),
             values,
             deleted: vec![false; n],
             proto,
@@ -1705,11 +1755,11 @@ impl Value {
     /// the table in the VM, exactly like array methods are.
     pub fn map(proto: Value, container: u8) -> Value {
         let od = ObjectData {
-            shape: Rc::new(Shape {
-                map: hashbrown::HashMap::new(),
-                insertion_order: Vec::new(),
-                names: Vec::new(),
-            }),
+            shape: Rc::new(Shape::new(
+                hashbrown::HashMap::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
             values: Vec::new(),
             deleted: Vec::new(),
             proto,
@@ -2658,8 +2708,6 @@ fn abstract_eq(a: &Value, b: &Value) -> bool {
         return true;
     }
     // Step 3: number vs string → compare with ToNumber(string).
-    let a_num = a.as_number().or_else(|| a.as_int().map(|i| i as f64));
-    let b_num = b.as_number().or_else(|| b.as_int().map(|i| i as f64));
     if let (Some(x), Some(s)) = (a_num, b.as_str()) {
         return x == js_string_to_number(s);
     }
@@ -2713,6 +2761,25 @@ fn js_concat_str(v: &Value) -> String {
 fn to_primitive_default(v: &Value) -> Value {
     if let Some(arr) = v.as_array() {
         let arr = arr.borrow();
+        if arr.len() == 0 {
+            return Value::string(String::new());
+        }
+        if arr.len() == 1 {
+            let first = match &*arr {
+                ArrayData::Ints(vs) => return Value::string(vs[0].to_string()),
+                ArrayData::Values(vs) => vs[0].clone(),
+            };
+            if first.is_null() || first.is_undefined() {
+                return Value::string(String::new());
+            } else if first.as_array().is_some() {
+                return Value::string(match to_primitive_default(&first).as_str() {
+                    Some(s) => s.to_string(),
+                    None => String::new(),
+                });
+            } else {
+                return Value::string(to_string_raw(&first));
+            }
+        }
         let mut parts: Vec<String> = Vec::with_capacity(arr.len());
         for e in arr.to_values() {
             if e.is_null() || e.is_undefined() {
@@ -3521,7 +3588,7 @@ impl fmt::Debug for Value {
 }
 
 unsafe impl Send for Value {}
-unsafe impl Sync for Value {}
+// Note: Value is NOT Sync because it contains unsynchronized Rc-backed payloads.
 
 // ---- escape analysis (generational arena) ----------------------------------
 //
@@ -4080,7 +4147,10 @@ pub fn walk_value(
                     *v = Value(tag | usize_to_payload(new_addr));
                     return;
                 }
-                let new_addr = heap.promote_box(addr);
+                let new_addr = match heap.try_promote_box(addr) {
+                    Some(na) => na,
+                    None => return,
+                };
                 // Insert before recursing so cycles terminate.
                 map.insert(addr, new_addr);
                 match tag {
@@ -4101,10 +4171,11 @@ pub fn walk_value(
                             if !heap.addr_in_young(a) || map.contains_key(&a) {
                                 continue;
                             }
-                            let na = heap.promote_box(a);
-                            map.insert(a, na);
-                            let copy = na as *mut AString;
-                            promote_string_payload(heap, copy, &mut rope_stack);
+                            if let Some(na) = heap.try_promote_box(a) {
+                                map.insert(a, na);
+                                let copy = na as *mut AString;
+                                promote_string_payload(heap, copy, &mut rope_stack);
+                            }
                         }
                         // Pass 2: rewire cons children to the promoted
                         // addresses (children outside this heap — program or

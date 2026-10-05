@@ -35,7 +35,7 @@ pub(crate) fn sha256_bytes(input: &[u8]) -> [u8; 32] {
         msg.push(0);
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
@@ -522,6 +522,10 @@ pub(crate) fn make_fetch_sync() -> Value {
             .first()
             .map(|v| v.as_str().unwrap_or("").to_string())
             .unwrap_or_default();
+        if let Err(e) = vm.check_net_permission(&url) {
+            vm.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         let (mut method, mut headers, mut body, mut timeout_ms) = (
             "GET".to_string(),
             Vec::<(String, String)>::new(),

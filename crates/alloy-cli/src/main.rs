@@ -8,8 +8,32 @@ use std::time::Instant;
 
 mod pkg;
 
+fn parse_permissions(args: &[String]) -> (alloy_vm::Permissions, Vec<String>) {
+    let mut perms = alloy_vm::Permissions::default();
+    let mut remaining = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--sandbox" | "--deny-all" => perms = alloy_vm::Permissions::sandboxed(),
+            "--allow-all" => perms = perms.allow_all(true),
+            "--allow-read" => perms = perms.allow_read(true),
+            "--allow-write" => perms = perms.allow_write(true),
+            "--allow-net" => perms = perms.allow_net(true),
+            "--allow-python" => perms = perms.allow_python(true),
+            "--allow-spawn" => perms = perms.allow_spawn(true),
+            "--deny-read" => perms = perms.allow_read(false),
+            "--deny-write" => perms = perms.allow_write(false),
+            "--deny-net" => perms = perms.allow_net(false),
+            "--deny-python" => perms = perms.allow_python(false),
+            "--deny-spawn" => perms = perms.allow_spawn(false),
+            _ => remaining.push(arg.clone()),
+        }
+    }
+    (perms, remaining)
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let raw_args: Vec<String> = env::args().collect();
+    let (perms, args) = parse_permissions(&raw_args);
 
     if args.len() < 2 {
         run_repl();
@@ -23,14 +47,15 @@ fn main() {
                 std::process::exit(1);
             }
             let code = &args[2];
-            let program = match Compiler::compile_source(code) {
+            let stripped = alloy_vm::compiler::strip_typescript(code);
+            let program = match Compiler::compile_source(&stripped) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("compile error: {}", e);
                     std::process::exit(1);
                 }
             };
-            let mut vm = Vm::new(program);
+            let mut vm = Vm::new(program).with_permissions(perms);
             vm.run();
             if let Some(err) = vm.take_error() {
                 eprintln!("uncaught exception: {}", err);
@@ -38,28 +63,37 @@ fn main() {
             }
         }
         "--version" | "-v" => {
-            println!("alloy 0.2.0");
+            println!("alloy 0.3.0");
         }
         "--help" | "-h" => {
             println!("alloy - A hyper-optimized polyglot systems runtime");
             println!();
             println!("Usage:");
-            println!("  alloy                         Start the interactive REPL");
-            println!("  alloy <script.ajs|script.js>   Execute an alloy source file");
-            println!("  alloy <script.ax>             Execute precompiled bytecode");
-            println!("  alloy -e <code>               Evaluate inline JavaScript");
-            println!("  alloy repl                    Start the interactive REPL");
-            println!("  alloy init [dir]              Initialize a new Alloy project");
-            println!("  alloy add <pkg>               Add an npm dependency to project");
-            println!("  alloy install                 Install dependencies from alloy.json");
-            println!("  alloy test [filter]           Run test suite (*.test.ajs / *.test.js)");
+            println!("  alloy                             Start the interactive REPL");
+            println!("  alloy <script.ts|js|ajs>          Execute an alloy/TS source file");
+            println!("  alloy <script.ax>                 Execute precompiled bytecode");
+            println!("  alloy -e <code>                   Evaluate inline JavaScript");
+            println!("  alloy repl                        Start the interactive REPL");
+            println!("  alloy init [dir]                  Initialize a new Alloy project");
+            println!("  alloy add <pkg>                   Add an npm dependency to project");
+            println!("  alloy install                     Install dependencies from alloy.json");
+            println!("  alloy test [filter]               Run test suite (*.test.ajs / *.test.js)");
             println!(
-                "  alloy lsp                     Start the Language Server (JSON-RPC over stdio)"
+                "  alloy lsp                         Start the Language Server (JSON-RPC over stdio)"
             );
-            println!("  alloy --emit-ax <in> <out>    Compile source to .ax bytecode");
-            println!("  alloy --bench <script.ajs>    Benchmark execution");
-            println!("  alloy --disasm <file>         Disassemble source or bytecode");
-            println!("  alloy --version               Print version");
+            println!("  alloy --emit-ax <in> <out>        Compile source to .ax bytecode");
+            println!("  alloy --bench <script.ajs>        Benchmark execution");
+            println!("  alloy --disasm <file>             Disassemble source or bytecode");
+            println!("  alloy --version                   Print version");
+            println!();
+            println!("Security Sandbox Options:");
+            println!("  --sandbox, --deny-all             Run in sandboxed mode (all capabilities denied)");
+            println!("  --allow-all                       Allow all capabilities (default)");
+            println!("  --allow-read / --deny-read        Allow/deny filesystem read access");
+            println!("  --allow-write / --deny-write      Allow/deny filesystem write access");
+            println!("  --allow-net / --deny-net          Allow/deny network access");
+            println!("  --allow-python / --deny-python    Allow/deny Python sidecar/embed access");
+            println!("  --allow-spawn / --deny-spawn      Allow/deny actor / worker spawn access");
         }
         "init" => {
             let dir = args.get(2).map(|s| s.as_str());
@@ -99,10 +133,10 @@ fn main() {
         }
         "run" => {
             if args.len() < 3 {
-                eprintln!("Usage: alloy run <script.ajs|script.js|script.ax>");
+                eprintln!("Usage: alloy run <script.ts|script.js|script.ajs|script.ax>");
                 std::process::exit(1);
             }
-            run_file(&args[2]);
+            run_file(&args[2], perms);
         }
         "--emit-ax" => {
             if args.len() < 4 {
@@ -134,7 +168,7 @@ fn main() {
             run_repl();
         }
         _ => {
-            run_file(&args[1]);
+            run_file(&args[1], perms);
         }
     }
 }
@@ -163,7 +197,12 @@ fn load_program(path: &str) -> Program {
                 std::process::exit(1);
             }
         };
-        let mut program = match Compiler::compile_source(&source) {
+        let src = if path.ends_with(".ts") || path.ends_with(".tsx") {
+            alloy_vm::compiler::strip_typescript(&source)
+        } else {
+            source
+        };
+        let mut program = match Compiler::compile_source(&src) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("compile error: {}", e);
@@ -175,12 +214,12 @@ fn load_program(path: &str) -> Program {
     }
 }
 
-fn run_file(path: &str) {
+fn run_file(path: &str, perms: alloy_vm::Permissions) {
     let start = Instant::now();
     let program = load_program(path);
     let compile_time = start.elapsed();
 
-    let mut vm = Vm::new(program);
+    let mut vm = Vm::new(program).with_permissions(perms);
     // Relative `require('./x.ajs')` resolves against the script's own
     // directory (Node semantics), not the process cwd.
     vm.set_script_path(path);
@@ -210,12 +249,17 @@ fn run_file(path: &str) {
 }
 
 fn emit_ax(input: &str, output: &str, module: bool) {
-    let source = match fs::read_to_string(input) {
+    let raw_source = match fs::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot read '{}': {}", input, e);
             std::process::exit(1);
         }
+    };
+    let source = if input.ends_with(".ts") || input.ends_with(".tsx") {
+        alloy_vm::compiler::strip_typescript(&raw_source)
+    } else {
+        raw_source
     };
     // `--module`: compile with module semantics (top-level globals, exports
     // recorded, is_module flag) so `require('./x.ax')` can load it. Default

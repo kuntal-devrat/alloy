@@ -291,6 +291,7 @@ pub struct Vm {
     /// crosses `HOT_THRESHOLD`, a line is logged with `ALLOY_JIT_LOG=1`.
     pub(crate) backedge_counts: hashbrown::HashMap<usize, u32>,
     pub(crate) jit: Option<Box<crate::jit::JitEngine>>,
+    pub permissions: crate::permissions::Permissions,
 }
 
 unsafe impl Send for Vm {}
@@ -304,6 +305,11 @@ impl Vm {
             Arc::new(SharedPyRegistry::default()),
             None,
         )
+    }
+
+    pub fn with_permissions(mut self, permissions: crate::permissions::Permissions) -> Self {
+        self.permissions = permissions;
+        self
     }
 
     /// Override the per-call python timeout for pools THIS VM spawns
@@ -475,6 +481,7 @@ impl Vm {
             op_hist_on: std::env::var("ALLOY_OP_HIST").is_ok(),
             backedge_counts: hashbrown::HashMap::new(),
             jit: crate::jit::JitEngine::new().ok().map(Box::new),
+            permissions: crate::permissions::Permissions::default(),
         }
     }
 
@@ -730,6 +737,26 @@ impl VmHost for Vm {
         }
     }
 
+    fn check_read_permission(&mut self, path: &str) -> Result<(), String> {
+        self.permissions.check_read(path)
+    }
+
+    fn check_write_permission(&mut self, path: &str) -> Result<(), String> {
+        self.permissions.check_write(path)
+    }
+
+    fn check_net_permission(&mut self, target: &str) -> Result<(), String> {
+        self.permissions.check_net(target)
+    }
+
+    fn check_python_permission(&mut self) -> Result<(), String> {
+        self.permissions.check_python()
+    }
+
+    fn check_spawn_permission(&mut self) -> Result<(), String> {
+        self.permissions.check_spawn()
+    }
+
     fn this_value(&self) -> Value {
         self.native_this.clone().unwrap_or(Value::undefined())
     }
@@ -880,10 +907,18 @@ impl VmHost for Vm {
         base: usize,
         cap: usize,
     ) -> Value {
+        if let Err(e) = self.check_python_permission() {
+            self.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         self.vm_python_call(src, func, args, base, cap)
     }
 
     fn spawn_fn(&mut self, f: &Value, args: &[Value]) -> Value {
+        if let Err(e) = self.check_spawn_permission() {
+            self.throw_exception(Value::string(e));
+            return Value::undefined();
+        }
         self.vm_spawn_fn(f, args)
     }
 
