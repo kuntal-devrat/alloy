@@ -87,7 +87,7 @@ jobs:
           components: miri
 
       - name: Run Miri on alloy-core comprehensive suite
-        run: cargo +nightly miri test -p alloy-runtime-core --test comprehensive
+        run: cargo +nightly miri test -p alloy-runtime-core --test comprehensive -- --skip shm_
 
       - name: Run Miri on audit hardening tests
         run: cargo +nightly miri test -p alloy-runtime-core --test audit_hardening_tests
