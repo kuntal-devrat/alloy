@@ -65,7 +65,10 @@ fn test_opt_01_and_opt_03_shape_sorted_keys_and_transitions() {
     let shape = Shape::new(map, insertion_order, names);
     // Keys should be cached in pre-sorted order
     let sorted = shape.keys_sorted();
-    assert_eq!(sorted, vec![&"a".to_string(), &"m".to_string(), &"z".to_string()]);
+    assert_eq!(
+        sorted,
+        vec![&"a".to_string(), &"m".to_string(), &"z".to_string()]
+    );
 }
 
 #[test]

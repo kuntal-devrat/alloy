@@ -85,27 +85,44 @@ impl Permissions {
         if self.allow_all || self.allow_read {
             return Ok(());
         }
-        if self.read_whitelist.iter().any(|allowed| path.starts_with(allowed)) {
+        if self
+            .read_whitelist
+            .iter()
+            .any(|allowed| path.starts_with(allowed))
+        {
             return Ok(());
         }
-        Err(format!("PermissionDenied: read access to '{}' is not permitted", path))
+        Err(format!(
+            "PermissionDenied: read access to '{}' is not permitted",
+            path
+        ))
     }
 
     pub fn check_write(&self, path: &str) -> Result<(), String> {
         if self.allow_all || self.allow_write {
             return Ok(());
         }
-        if self.write_whitelist.iter().any(|allowed| path.starts_with(allowed)) {
+        if self
+            .write_whitelist
+            .iter()
+            .any(|allowed| path.starts_with(allowed))
+        {
             return Ok(());
         }
-        Err(format!("PermissionDenied: write access to '{}' is not permitted", path))
+        Err(format!(
+            "PermissionDenied: write access to '{}' is not permitted",
+            path
+        ))
     }
 
     pub fn check_net(&self, target: &str) -> Result<(), String> {
         if self.allow_all || self.allow_net {
             return Ok(());
         }
-        Err(format!("PermissionDenied: network access to '{}' is not permitted", target))
+        Err(format!(
+            "PermissionDenied: network access to '{}' is not permitted",
+            target
+        ))
     }
 
     pub fn check_python(&self) -> Result<(), String> {

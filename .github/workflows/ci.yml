@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -85,7 +85,10 @@ jobs:
           components: miri
 
       - name: Run Miri on alloy-core comprehensive suite
-        run: cargo +nightly miri test -p alloy-core --test comprehensive
+        run: cargo +nightly miri test -p alloy-runtime-core --test comprehensive
+
+      - name: Run Miri on audit hardening tests
+        run: cargo +nightly miri test -p alloy-runtime-core --test audit_hardening_tests
 
       - name: Run Miri on alloy-core unit tests
-        run: cargo +nightly miri test -p alloy-core --lib -- --skip startup_sweep --skip shm_
+        run: cargo +nightly miri test -p alloy-runtime-core --lib -- --skip startup_sweep --skip shm_

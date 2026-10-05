@@ -73,7 +73,8 @@ pub fn strip_typescript(source: &str) -> String {
         // Check for `interface Name`
         if starts_with_word(&chars, i, "interface") {
             let after_iface = skip_whitespace(&chars, i + 9);
-            if after_iface < n && (chars[after_iface].is_alphabetic() || chars[after_iface] == '_') {
+            if after_iface < n && (chars[after_iface].is_alphabetic() || chars[after_iface] == '_')
+            {
                 // Find opening brace '{'
                 let mut brace_idx = after_iface;
                 while brace_idx < n && chars[brace_idx] != '{' {
@@ -118,7 +119,12 @@ pub fn strip_typescript(source: &str) -> String {
             let before = prev_non_whitespace(&chars, i);
             let after = skip_whitespace(&chars, i + 2);
             if let Some(b) = before {
-                if (b.is_alphanumeric() || b == ')' || b == ']' || b == '}' || b == '"' || b == '\'')
+                if (b.is_alphanumeric()
+                    || b == ')'
+                    || b == ']'
+                    || b == '}'
+                    || b == '"'
+                    || b == '\'')
                     && after < n
                     && (chars[after].is_alphabetic() || chars[after] == '{' || chars[after] == '(')
                 {
@@ -129,21 +135,31 @@ pub fn strip_typescript(source: &str) -> String {
                     let mut brace_depth = 0;
                     while i < n {
                         let ch = chars[i];
-                        if ch == '(' { paren_depth += 1; }
-                        else if ch == ')' {
-                            if paren_depth == 0 { break; }
+                        if ch == '(' {
+                            paren_depth += 1;
+                        } else if ch == ')' {
+                            if paren_depth == 0 {
+                                break;
+                            }
                             paren_depth -= 1;
-                        }
-                        else if ch == '<' { angle_depth += 1; }
-                        else if ch == '>' {
-                            if angle_depth > 0 { angle_depth -= 1; }
-                        }
-                        else if ch == '{' { brace_depth += 1; }
-                        else if ch == '}' {
-                            if brace_depth == 0 { break; }
+                        } else if ch == '<' {
+                            angle_depth += 1;
+                        } else if ch == '>' {
+                            if angle_depth > 0 {
+                                angle_depth -= 1;
+                            }
+                        } else if ch == '{' {
+                            brace_depth += 1;
+                        } else if ch == '}' {
+                            if brace_depth == 0 {
+                                break;
+                            }
                             brace_depth -= 1;
-                        }
-                        else if (ch == ',' || ch == ';' || ch == ']' || ch == '\n') && paren_depth == 0 && angle_depth == 0 && brace_depth == 0 {
+                        } else if (ch == ',' || ch == ';' || ch == ']' || ch == '\n')
+                            && paren_depth == 0
+                            && angle_depth == 0
+                            && brace_depth == 0
+                        {
                             break;
                         }
                         i += 1;
@@ -158,11 +174,17 @@ pub fn strip_typescript(source: &str) -> String {
             || starts_with_word(&chars, i, "protected")
             || starts_with_word(&chars, i, "readonly")
         {
-            let len = if starts_with_word(&chars, i, "readonly") { 8 }
-                else if starts_with_word(&chars, i, "protected") { 9 }
-                else { 6 };
+            let len = if starts_with_word(&chars, i, "readonly") {
+                8
+            } else if starts_with_word(&chars, i, "protected") {
+                9
+            } else {
+                6
+            };
             let after = skip_whitespace(&chars, i + len);
-            if after < n && (chars[after].is_alphabetic() || chars[after] == '_' || chars[after] == '#') {
+            if after < n
+                && (chars[after].is_alphabetic() || chars[after] == '_' || chars[after] == '#')
+            {
                 i = after;
                 continue;
             }
@@ -189,29 +211,42 @@ pub fn strip_typescript(source: &str) -> String {
 
                 while i < n {
                     let ch = chars[i];
-                    if ch == '(' { paren_depth += 1; }
-                    else if ch == ')' {
-                        if paren_depth == 0 { break; }
+                    if ch == '(' {
+                        paren_depth += 1;
+                    } else if ch == ')' {
+                        if paren_depth == 0 {
+                            break;
+                        }
                         paren_depth -= 1;
-                    }
-                    else if ch == '<' { angle_depth += 1; }
-                    else if ch == '>' {
-                        if angle_depth > 0 { angle_depth -= 1; }
-                    }
-                    else if ch == '{' {
-                        if brace_depth == 0 && paren_depth == 0 && angle_depth == 0 { break; }
+                    } else if ch == '<' {
+                        angle_depth += 1;
+                    } else if ch == '>' {
+                        if angle_depth > 0 {
+                            angle_depth -= 1;
+                        }
+                    } else if ch == '{' {
+                        if brace_depth == 0 && paren_depth == 0 && angle_depth == 0 {
+                            break;
+                        }
                         brace_depth += 1;
-                    }
-                    else if ch == '}' {
-                        if brace_depth == 0 { break; }
+                    } else if ch == '}' {
+                        if brace_depth == 0 {
+                            break;
+                        }
                         brace_depth -= 1;
-                    }
-                    else if ch == '[' { bracket_depth += 1; }
-                    else if ch == ']' {
-                        if bracket_depth == 0 { break; }
+                    } else if ch == '[' {
+                        bracket_depth += 1;
+                    } else if ch == ']' {
+                        if bracket_depth == 0 {
+                            break;
+                        }
                         bracket_depth -= 1;
-                    }
-                    else if (ch == '=' || ch == ',' || ch == ';') && paren_depth == 0 && angle_depth == 0 && brace_depth == 0 && bracket_depth == 0 {
+                    } else if (ch == '=' || ch == ',' || ch == ';')
+                        && paren_depth == 0
+                        && angle_depth == 0
+                        && brace_depth == 0
+                        && bracket_depth == 0
+                    {
                         break;
                     }
                     i += 1;
@@ -238,11 +273,14 @@ fn starts_with_word(chars: &[char], idx: usize, word: &str) -> bool {
         }
     }
     // Check boundary
-    if idx > 0 && (chars[idx - 1].is_alphanumeric() || chars[idx - 1] == '_' || chars[idx - 1] == '$') {
+    if idx > 0
+        && (chars[idx - 1].is_alphanumeric() || chars[idx - 1] == '_' || chars[idx - 1] == '$')
+    {
         return false;
     }
     let end = idx + wchars.len();
-    if end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '$') {
+    if end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '$')
+    {
         return false;
     }
     true
@@ -298,7 +336,9 @@ fn skip_balanced(chars: &[char], start: usize, open: char, close: char) -> usize
 
 fn is_likely_type_annotation(chars: &[char], colon_idx: usize) -> bool {
     let prev = prev_non_whitespace(chars, colon_idx);
-    let Some(p) = prev else { return false; };
+    let Some(p) = prev else {
+        return false;
+    };
 
     // If preceded by ')' -> return type annotation: `(...): Type {` or `(...): Type =>`
     if p == ')' {
@@ -326,7 +366,7 @@ fn is_likely_type_annotation(chars: &[char], colon_idx: usize) -> bool {
             } else {
                 // Inside an open `(` that wraps this `:` -> function parameter: `function f(x: number)`
                 // Check if this is a ternary within parens: `(a ? b : c)`
-                let has_q = chars[stmt_start..colon_idx].iter().any(|&c| c == '?');
+                let has_q = chars[stmt_start..colon_idx].contains(&'?');
                 return !has_q;
             }
         }
@@ -355,12 +395,12 @@ fn is_likely_type_annotation(chars: &[char], colon_idx: usize) -> bool {
     }
 
     // Ternary check: if there is a '?' between stmt_start and colon_idx
-    if chars[stmt_start..colon_idx].iter().any(|&c| c == '?') {
+    if chars[stmt_start..colon_idx].contains(&'?') {
         return false;
     }
 
     // If there is an '=' between stmt_start and colon_idx, we are on the RHS of an assignment
-    if chars[stmt_start..colon_idx].iter().any(|&c| c == '=') {
+    if chars[stmt_start..colon_idx].contains(&'=') {
         return false;
     }
 

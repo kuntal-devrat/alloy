@@ -247,8 +247,7 @@ impl HttpServer {
                         let _ = timeout(cfg.write_timeout, stream.write_all(&resp)).await;
                         break 'conn;
                     }
-                    if buf.len() > cfg.max_header_bytes
-                        && !buf.windows(4).any(|w| w == b"\r\n\r\n")
+                    if buf.len() > cfg.max_header_bytes && !buf.windows(4).any(|w| w == b"\r\n\r\n")
                     {
                         let resp = build_response(
                             431,

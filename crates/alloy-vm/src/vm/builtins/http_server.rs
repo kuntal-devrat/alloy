@@ -246,8 +246,10 @@ fn start_handler(
         *s_html.content_type.lock().unwrap() = Some("text/html; charset=utf-8".to_string());
         Value::undefined()
     }));
+    let res_holder: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
     // res.status(code): override the status (default 200).
     let s_status = slots.clone();
+    let r_status = res_holder.clone();
     let status = Value::native(Arc::new(move |args, _vm| {
         let code = args
             .first()
@@ -255,12 +257,17 @@ fn start_handler(
             .unwrap_or(200)
             .clamp(100, 599);
         *s_status.status.lock().unwrap() = code;
-        Value::undefined()
+        r_status
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Value::undefined())
     }));
     // res.set(name, value): extra response header. `Content-Type` replaces
     // the content-type slot (so `res.set("Content-Type", ...)` + `res.text`
     // never emits duplicate Content-Type headers).
     let s_set = slots.clone();
+    let r_set = res_holder.clone();
     let set = Value::native(Arc::new(move |args, _vm| {
         let name = args
             .first()
@@ -271,15 +278,14 @@ fn start_handler(
             .get(1)
             .map(|v| v.as_str().unwrap_or("").to_string())
             .unwrap_or_default();
-        if name.is_empty() {
-            return Value::undefined();
+        if !name.is_empty() {
+            if name.eq_ignore_ascii_case("content-type") {
+                *s_set.content_type.lock().unwrap() = Some(val);
+            } else {
+                s_set.headers.lock().unwrap().push((name, val));
+            }
         }
-        if name.eq_ignore_ascii_case("content-type") {
-            *s_set.content_type.lock().unwrap() = Some(val);
-        } else {
-            s_set.headers.lock().unwrap().push((name, val));
-        }
-        Value::undefined()
+        r_set.lock().unwrap().clone().unwrap_or(Value::undefined())
     }));
     let mut res = HashMap::new();
     res.insert("send".to_string(), send);
@@ -288,6 +294,8 @@ fn start_handler(
     res.insert("html".to_string(), html);
     res.insert("status".to_string(), status);
     res.insert("set".to_string(), set);
+    let res_val = Value::object(res);
+    *res_holder.lock().unwrap() = Some(res_val.clone());
     let mut req = HashMap::new();
     req.insert("method".to_string(), Value::string(method));
     req.insert("url".to_string(), Value::string(url.clone()));
@@ -329,7 +337,7 @@ fn start_handler(
         let first = ip.split(',').next().unwrap_or("").trim().to_string();
         req.insert("ip".to_string(), Value::string(first));
     }
-    let result = vm.call_value(handler, &[Value::object(req), Value::object(res)]);
+    let result = vm.call_value(handler, &[Value::object(req), res_val]);
     if let Some(err) = vm.take_uncaught_exception() {
         // A synchronous throw inside the handler: surface it as a rejected
         // handler promise so the serve loop responds 500, and clear the

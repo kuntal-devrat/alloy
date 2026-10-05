@@ -69,7 +69,9 @@ fn test_permissions_sandbox_blocks_fs() {
     let program = Compiler::compile_source(code).expect("compile error");
     let mut vm = Vm::new(program).with_permissions(Permissions::sandboxed());
     vm.run();
-    let err = vm.take_error().expect("Expected error when accessing fs in sandbox");
+    let err = vm
+        .take_error()
+        .expect("Expected error when accessing fs in sandbox");
     assert!(
         err.to_string().contains("PermissionDenied"),
         "Expected PermissionDenied error, got: {}",
@@ -86,7 +88,9 @@ fn test_permissions_sandbox_blocks_fetch() {
     let program = Compiler::compile_source(code).expect("compile error");
     let mut vm = Vm::new(program).with_permissions(Permissions::sandboxed());
     vm.run();
-    let err = vm.take_error().expect("Expected error when fetching in sandbox");
+    let err = vm
+        .take_error()
+        .expect("Expected error when fetching in sandbox");
     assert!(
         err.to_string().contains("PermissionDenied"),
         "Expected PermissionDenied error, got: {}",
@@ -111,7 +115,9 @@ fn test_permissions_allow_read_permits_reading() {
 #[test]
 fn test_permissions_sandbox_blocks_python() {
     let perms = Permissions::sandboxed();
-    let err = perms.check_python().expect_err("sandboxed must disallow python");
+    let err = perms
+        .check_python()
+        .expect_err("sandboxed must disallow python");
     assert!(err.contains("Python access is not permitted"));
 
     let allowed = Permissions::sandboxed().allow_python(true);
@@ -127,11 +133,12 @@ fn test_permissions_sandbox_blocks_spawn() {
     let program = Compiler::compile_source(code).expect("compile error");
     let mut vm = Vm::new(program).with_permissions(Permissions::sandboxed());
     vm.run();
-    let err = vm.take_error().expect("Expected error when spawning in sandbox");
+    let err = vm
+        .take_error()
+        .expect("Expected error when spawning in sandbox");
     assert!(
         err.to_string().contains("PermissionDenied"),
         "Expected PermissionDenied error, got: {}",
         err
     );
 }
-
