@@ -19,7 +19,17 @@ foreach ($f in $files) {
     $alloyExit = $LASTEXITCODE
     $alloyOut = $alloyOut -replace '\b-inf\b', '-Infinity' -replace '\binf\b', 'Infinity'
 
-    $nodeCode = "const print = console.log;`n" + (Get-Content $f.FullName -Raw)
+    $polyfill = @"
+const print = console.log;
+if (typeof Promise.withResolvers !== 'function') {
+    Promise.withResolvers = function() {
+        let resolve, reject;
+        const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+        return { promise, resolve, reject };
+    };
+}
+"@
+    $nodeCode = $polyfill + "`n" + (Get-Content $f.FullName -Raw)
     $nodeOut = $nodeCode | & node 2>&1 | Out-String
     $nodeExit = $LASTEXITCODE
     $nodeOut = $nodeOut -replace '\b-0\b', '0'
@@ -32,6 +42,12 @@ foreach ($f in $files) {
         $passed++
     } else {
         Write-Host "FAIL $($f.Name) (alloy=$alloyExit, node=$nodeExit)" -ForegroundColor Red
+        if ($alloyExit -ne 0 -or $nodeExit -ne 0) {
+            Write-Host "--- Alloy ($alloyExit) ---"
+            Write-Host $alloyOut
+            Write-Host "--- Node ($nodeExit) ---"
+            Write-Host $nodeOut
+        }
         $failed++
     }
 }

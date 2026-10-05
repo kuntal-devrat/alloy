@@ -42,7 +42,17 @@ for f in "$DIR"/t*.js; do
     # `Infinity`/`-Infinity`.
     sed -i -e 's/\b-inf\b/-Infinity/g; s/\binf\b/Infinity/g' "$TMPA"
 
-    { printf 'const print = console.log;\n'; cat "$f"; } > "$WORK/node_input.js"
+    {
+        printf 'const print = console.log;\n'
+        printf 'if (typeof Promise.withResolvers !== "function") {\n'
+        printf '    Promise.withResolvers = function() {\n'
+        printf '        let resolve, reject;\n'
+        printf '        const promise = new Promise((res, rej) => { resolve = res; reject = rej; });\n'
+        printf '        return { promise, resolve, reject };\n'
+        printf '    };\n'
+        printf '}\n'
+        cat "$f"
+    } > "$WORK/node_input.js"
     "$NODE" "$WORK/node_input.js" > "$TMPN" 2>&1
     node_exit=$?
     # Display-only normalization: V8 prints `-0`, alloy prints `0`.
@@ -50,6 +60,14 @@ for f in "$DIR"/t*.js; do
 
     if [ "$alloy_exit" -ne 0 ] || [ "$node_exit" -ne 0 ]; then
         echo "DIFF  $name  (alloy exit=$alloy_exit, node exit=$node_exit)"
+        if [ "$alloy_exit" -ne 0 ]; then
+            echo "--- alloy output ---"
+            cat "$TMPA"
+        fi
+        if [ "$node_exit" -ne 0 ]; then
+            echo "--- node output ---"
+            cat "$TMPN"
+        fi
         failed_files+=("$name")
         fail=$((fail + 1))
         continue
