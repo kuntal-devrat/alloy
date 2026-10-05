@@ -177,13 +177,13 @@ fn test_stress_http_server_concurrent() {
 
                 let req = if r % 2 == 0 {
                     format!(
-                        "GET /test_{}_{} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                        "GET /test_{}_{} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
                         client_id, r
                     )
                 } else {
                     let body = format!("{{\"client\":{},\"seq\":{}}}", client_id, r);
                     format!(
-                        "POST /api HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                        "POST /api HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
                         body.len(),
                         body
                     )

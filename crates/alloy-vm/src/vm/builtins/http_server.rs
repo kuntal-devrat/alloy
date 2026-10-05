@@ -26,14 +26,56 @@ pub(crate) fn parse_http_request(text: &str) -> (String, String, String) {
     (m, u, b)
 }
 
+/// Decode HTTP/1.1 chunked transfer-encoded data.
+/// Returns `Some((decoded_payload, total_consumed_bytes))` if a full chunked body
+/// has arrived (terminated by `0\r\n\r\n` or `0\r\n[trailers]\r\n`).
+/// Returns `None` if the chunked stream is still incomplete (needs more data).
+pub fn decode_chunked_body(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let mut decoded = Vec::new();
+    let mut offset = 0;
+
+    loop {
+        let rem = &buf[offset..];
+        let crlf = rem.windows(2).position(|w| w == b"\r\n")?;
+        let size_str = std::str::from_utf8(&rem[..crlf]).ok()?.trim();
+        let hex_part = size_str.split(';').next()?.trim();
+        let chunk_size = usize::from_str_radix(hex_part, 16).ok()?;
+
+        let chunk_data_start = offset + crlf + 2;
+
+        if chunk_size == 0 {
+            // Last chunk. Look for trailer end "\r\n\r\n" or immediate "\r\n"
+            let rem_trailers = &buf[chunk_data_start..];
+            if rem_trailers.starts_with(b"\r\n") {
+                return Some((decoded, chunk_data_start + 2));
+            }
+            let end_trailers = rem_trailers.windows(4).position(|w| w == b"\r\n\r\n")?;
+            return Some((decoded, chunk_data_start + end_trailers + 4));
+        }
+
+        let chunk_data_end = chunk_data_start + chunk_size;
+        // Need chunk data + trailing "\r\n"
+        if buf.len() < chunk_data_end + 2 {
+            return None; // incomplete chunk
+        }
+        if &buf[chunk_data_end..chunk_data_end + 2] != b"\r\n" {
+            // Malformed chunk framing
+            return None;
+        }
+
+        decoded.extend_from_slice(&buf[chunk_data_start..chunk_data_end]);
+        offset = chunk_data_end + 2;
+    }
+}
+
 /// Full parse: method, url (with query), body string, headers (original case).
 pub fn parse_http_request_full(text: &str) -> (String, String, String, Vec<(String, String)>) {
     let mut method = "GET".to_string();
     let mut path = "/".to_string();
     let mut headers = Vec::new();
-    let (head, body) = match text.split_once("\r\n\r\n") {
-        Some((h, b)) => (h, b.to_string()),
-        None => (text, String::new()),
+    let (head, raw_body) = match text.split_once("\r\n\r\n") {
+        Some((h, b)) => (h, b),
+        None => (text, ""),
     };
     let mut lines = head.lines();
     if let Some(first) = lines.next() {
@@ -53,7 +95,43 @@ pub fn parse_http_request_full(text: &str) -> (String, String, String, Vec<(Stri
             }
         }
     }
+    let is_chunked = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
+    });
+    let body = if is_chunked {
+        decode_chunked_body(raw_body.as_bytes())
+            .map(|(d, _)| String::from_utf8_lossy(&d).into_owned())
+            .unwrap_or_else(|| raw_body.to_string())
+    } else {
+        raw_body.to_string()
+    };
     (method, path, body, headers)
+}
+
+/// Extract HTTP protocol version ("HTTP/1.1", "HTTP/1.0", etc.) from the first line.
+pub(crate) fn parse_http_version(text: &str) -> &str {
+    if let Some(first_line) = text.lines().next() {
+        if let Some(v) = first_line.split_whitespace().nth(2) {
+            return v;
+        }
+    }
+    "HTTP/1.1"
+}
+
+/// Check if connection should remain open across requests (HTTP/1.1 persistent connection).
+pub(crate) fn should_keep_alive(headers: &[(String, String)], text: &str) -> bool {
+    let version = parse_http_version(text);
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("connection") {
+            if v.eq_ignore_ascii_case("close") {
+                return false;
+            }
+            if v.eq_ignore_ascii_case("keep-alive") {
+                return true;
+            }
+        }
+    }
+    !version.starts_with("HTTP/1.0")
 }
 
 /// One in-flight HTTP connection: reading the request, running its handler,
@@ -74,26 +152,49 @@ struct PendingRequest {
     /// When the connection was accepted; stalled reads are dropped after this
     /// + REQUEST_READ_TIMEOUT so they can't leak connections.
     accepted_at: std::time::Instant,
+    /// Whether this connection should be kept open for subsequent requests.
+    keep_alive: bool,
+    /// Whether response headers were already sent to client (for chunked streams).
+    headers_sent: bool,
+}
+
+/// Compute total byte length of the first complete HTTP request in `buf`.
+/// Returns `Some(len)` if headers and full body (Content-Length or chunked) have arrived.
+/// Returns `None` if the request is incomplete.
+pub fn find_request_len(buf: &[u8]) -> Option<usize> {
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let body_start = header_end + 4;
+    let headers_str = String::from_utf8_lossy(&buf[..header_end]);
+    let is_chunked = headers_str.lines().any(|l| {
+        let lower = l.to_ascii_lowercase();
+        lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+    });
+
+    if is_chunked {
+        let (_, consumed) = decode_chunked_body(&buf[body_start..])?;
+        Some(body_start + consumed)
+    } else {
+        let content_len = headers_str
+            .lines()
+            .find_map(|l| {
+                let lower = l.to_ascii_lowercase();
+                lower
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        if buf.len() >= body_start + content_len {
+            Some(body_start + content_len)
+        } else {
+            None
+        }
+    }
 }
 
 /// A request is complete once its header block ("\r\n\r\n") has arrived and,
-/// for requests declaring a body, all Content-Length bytes are in.
+/// for requests declaring a body, all Content-Length or chunked bytes are in.
 pub(crate) fn request_complete(buf: &[u8]) -> bool {
-    let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return false;
-    };
-    let headers = String::from_utf8_lossy(&buf[..header_end]);
-    let body_start = header_end + 4;
-    let content_len = headers
-        .lines()
-        .find_map(|l| {
-            let lower = l.to_ascii_lowercase();
-            lower
-                .strip_prefix("content-length:")
-                .and_then(|v| v.trim().parse::<usize>().ok())
-        })
-        .unwrap_or(0);
-    buf.len().saturating_sub(body_start) >= content_len
+    find_request_len(buf).is_some()
 }
 
 /// Percent-decode a URL component (`+` → space, `%XX` → byte). Malformed
@@ -187,6 +288,9 @@ struct ResSlots {
     status: Arc<Mutex<u16>>,
     headers: Arc<Mutex<Vec<(String, String)>>>,
     content_type: Arc<Mutex<Option<String>>>,
+    stream_chunks: Arc<Mutex<Vec<Vec<u8>>>>,
+    is_chunked: Arc<Mutex<bool>>,
+    ended: Arc<Mutex<bool>>,
 }
 
 /// Parse a complete request, invoke the handler, and return the response slots
@@ -209,6 +313,7 @@ fn start_handler(
                 serialize_value(v).into_bytes()
             }
         });
+        *s_send.ended.lock().unwrap() = true;
         Value::undefined()
     }));
     // res.json(obj): explicit JSON.
@@ -220,6 +325,7 @@ fn start_handler(
         if ct.is_none() {
             *ct = Some("application/json".to_string());
         }
+        *s_json.ended.lock().unwrap() = true;
         Value::undefined()
     }));
     // res.text(s) / res.html(s): string bodies with content type.
@@ -234,6 +340,7 @@ fn start_handler(
         if ct.is_none() {
             *ct = Some("text/plain; charset=utf-8".to_string());
         }
+        *s_text.ended.lock().unwrap() = true;
         Value::undefined()
     }));
     let s_html = slots.clone();
@@ -244,6 +351,7 @@ fn start_handler(
             .unwrap_or_default();
         *s_html.body.lock().unwrap() = Some(s.into_bytes());
         *s_html.content_type.lock().unwrap() = Some("text/html; charset=utf-8".to_string());
+        *s_html.ended.lock().unwrap() = true;
         Value::undefined()
     }));
     let res_holder: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
@@ -287,6 +395,47 @@ fn start_handler(
         }
         r_set.lock().unwrap().clone().unwrap_or(Value::undefined())
     }));
+    // res.write(chunk): stream a chunk using HTTP/1.1 chunked transfer encoding.
+    let s_write = slots.clone();
+    let r_write = res_holder.clone();
+    let write = Value::native(Arc::new(move |args, _vm| {
+        *s_write.is_chunked.lock().unwrap() = true;
+        if let Some(chunk_val) = args.first() {
+            let chunk = if let Some(s) = chunk_val.as_str() {
+                s.as_bytes().to_vec()
+            } else {
+                serialize_value(chunk_val).into_bytes()
+            };
+            if !chunk.is_empty() {
+                s_write.stream_chunks.lock().unwrap().push(chunk);
+            }
+        }
+        r_write.lock().unwrap().clone().unwrap_or(Value::bool(true))
+    }));
+    // res.end([chunk]): complete the response.
+    let s_end = slots.clone();
+    let r_end = res_holder.clone();
+    let end = Value::native(Arc::new(move |args, _vm| {
+        if let Some(chunk_val) = args.first() {
+            if !chunk_val.is_undefined() && !chunk_val.is_null() {
+                let chunk = if let Some(s) = chunk_val.as_str() {
+                    s.as_bytes().to_vec()
+                } else {
+                    serialize_value(chunk_val).into_bytes()
+                };
+                let is_chunked = *s_end.is_chunked.lock().unwrap();
+                if is_chunked {
+                    if !chunk.is_empty() {
+                        s_end.stream_chunks.lock().unwrap().push(chunk);
+                    }
+                } else {
+                    *s_end.body.lock().unwrap() = Some(chunk);
+                }
+            }
+        }
+        *s_end.ended.lock().unwrap() = true;
+        r_end.lock().unwrap().clone().unwrap_or(Value::undefined())
+    }));
     let mut res = HashMap::new();
     res.insert("send".to_string(), send);
     res.insert("json".to_string(), json);
@@ -294,6 +443,8 @@ fn start_handler(
     res.insert("html".to_string(), html);
     res.insert("status".to_string(), status);
     res.insert("set".to_string(), set);
+    res.insert("write".to_string(), write);
+    res.insert("end".to_string(), end);
     let res_val = Value::object(res);
     *res_holder.lock().unwrap() = Some(res_val.clone());
     let mut req = HashMap::new();
@@ -356,7 +507,7 @@ fn start_handler(
 }
 
 pub(crate) fn write_response(stream: &mut std::net::TcpStream, status: &str, body: &str) {
-    write_response_full(stream, 200, None, &[], body.as_bytes());
+    write_response_full(stream, 200, None, &[], body.as_bytes(), false);
     let _ = status;
 }
 
@@ -366,19 +517,37 @@ pub(crate) fn write_response_full(
     content_type: Option<&str>,
     extra: &[(String, String)],
     body: &[u8],
+    keep_alive: bool,
 ) {
     let reason = reason_for(status);
     let ct = content_type.unwrap_or("application/json");
+    let conn_header = if keep_alive {
+        "Connection: keep-alive\r\n"
+    } else {
+        "Connection: close\r\n"
+    };
     let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}{}",
         status,
         reason,
         ct,
-        body.len()
+        body.len(),
+        conn_header,
+        if keep_alive {
+            "Keep-Alive: timeout=15, max=1000\r\n"
+        } else {
+            ""
+        }
     );
     for (k, v) in extra {
         // CRLF injection guard: header names/values must be single-line.
         if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
+            continue;
+        }
+        if k.eq_ignore_ascii_case("content-type")
+            || k.eq_ignore_ascii_case("connection")
+            || k.eq_ignore_ascii_case("content-length")
+        {
             continue;
         }
         head.push_str(&format!("{}: {}\r\n", k, v));
@@ -386,6 +555,67 @@ pub(crate) fn write_response_full(
     head.push_str("\r\n");
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
+pub(crate) fn write_chunked_response_headers(
+    stream: &mut std::net::TcpStream,
+    status: u16,
+    content_type: Option<&str>,
+    extra: &[(String, String)],
+    keep_alive: bool,
+) {
+    let reason = reason_for(status);
+    let ct = content_type.unwrap_or("text/plain; charset=utf-8");
+    let conn_header = if keep_alive {
+        "Connection: keep-alive\r\n"
+    } else {
+        "Connection: close\r\n"
+    };
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\n{}{}",
+        status,
+        reason,
+        ct,
+        conn_header,
+        if keep_alive {
+            "Keep-Alive: timeout=15, max=1000\r\n"
+        } else {
+            ""
+        }
+    );
+    for (k, v) in extra {
+        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
+            continue;
+        }
+        if k.eq_ignore_ascii_case("content-type")
+            || k.eq_ignore_ascii_case("connection")
+            || k.eq_ignore_ascii_case("transfer-encoding")
+            || k.eq_ignore_ascii_case("content-length")
+        {
+            continue;
+        }
+        head.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.flush();
+}
+
+pub(crate) fn write_chunk(stream: &mut std::net::TcpStream, chunk: &[u8]) {
+    if chunk.is_empty() {
+        return;
+    }
+    let header = format!("{:X}\r\n", chunk.len());
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(chunk);
+    let _ = stream.write_all(b"\r\n");
+    let _ = stream.flush();
+}
+
+pub(crate) fn finish_chunked_response(stream: &mut std::net::TcpStream) {
+    let _ = stream.write_all(b"0\r\n\r\n");
+    let _ = stream.flush();
 }
 
 /// Bind the HTTP listener (non-blocking accepts) and return it plus the
@@ -455,6 +685,8 @@ pub fn serve_loop(
                         body: None,
                         done: None,
                         accepted_at: std::time::Instant::now(),
+                        keep_alive: true,
+                        headers_sent: false,
                     });
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -467,17 +699,43 @@ pub fn serve_loop(
         let mut i = 0;
         while i < pending.len() {
             if pending[i].started {
+                // Connection currently executing a request: read any incoming pipelined data non-blocking
+                let mut chunk = [0u8; 4096];
+                match pending[i].stream.read(&mut chunk) {
+                    Ok(0) => {}
+                    Ok(n) => pending[i].buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => {}
+                }
                 i += 1;
                 continue;
             }
-            if pending[i].accepted_at.elapsed() > std::time::Duration::from_secs(30) {
+            let timeout_secs = if pending[i].buf.is_empty() { 15 } else { 30 };
+            if pending[i].accepted_at.elapsed() > std::time::Duration::from_secs(timeout_secs) {
                 pending.remove(i);
                 continue;
             }
+
+            // Check if buf already has a complete request (pipelined from earlier read)
+            if let Some(req_len) = find_request_len(&pending[i].buf) {
+                let req_bytes = pending[i].buf[..req_len].to_vec();
+                pending[i].buf.drain(..req_len);
+                let req_text = String::from_utf8_lossy(&req_bytes).to_string();
+                let (_, _, _, headers) = parse_http_request_full(&req_text);
+                let keep_alive = should_keep_alive(&headers, &req_text);
+                let (body, done) = start_handler(vm, handler, &req_text);
+                pending[i].started = true;
+                pending[i].body = Some(body);
+                pending[i].done = done;
+                pending[i].keep_alive = keep_alive;
+                pending[i].headers_sent = false;
+                i += 1;
+                continue;
+            }
+
             let mut chunk = [0u8; 4096];
             match pending[i].stream.read(&mut chunk) {
                 Ok(0) => {
-                    // Client closed before finishing its request.
+                    // Client closed connection (normal keep-alive EOF or disconnect)
                     pending.remove(i);
                     continue;
                 }
@@ -491,15 +749,20 @@ pub fn serve_loop(
                     continue;
                 }
             }
-            if request_complete(&pending[i].buf) {
-                let mut pr = pending.remove(i);
-                let req_text = String::from_utf8_lossy(&pr.buf).to_string();
-                pr.buf.clear();
+
+            if let Some(req_len) = find_request_len(&pending[i].buf) {
+                let req_bytes = pending[i].buf[..req_len].to_vec();
+                pending[i].buf.drain(..req_len);
+                let req_text = String::from_utf8_lossy(&req_bytes).to_string();
+                let (_, _, _, headers) = parse_http_request_full(&req_text);
+                let keep_alive = should_keep_alive(&headers, &req_text);
                 let (body, done) = start_handler(vm, handler, &req_text);
-                pr.started = true;
-                pr.body = Some(body);
-                pr.done = done;
-                pending.insert(i, pr);
+                pending[i].started = true;
+                pending[i].body = Some(body);
+                pending[i].done = done;
+                pending[i].keep_alive = keep_alive;
+                pending[i].headers_sent = false;
+                i += 1;
             } else {
                 i += 1;
             }
@@ -507,8 +770,7 @@ pub fn serve_loop(
         // 3. One non-blocking pump: settle python completions, run microtasks
         //    (resuming handlers that were awaiting python).
         vm.pump_async();
-        // 4. Write responses for every settled request: 200 with `res.send`'s
-        //    body, or 500 with the rejection reason when the handler failed.
+        // 4. Write responses for every settled or streaming request
         let mut i = 0;
         let mut completed = false;
         while i < pending.len() {
@@ -516,6 +778,18 @@ pub fn serve_loop(
                 i += 1;
                 continue;
             }
+
+            let slots = match &pending[i].body {
+                Some(s) => s.clone(),
+                None => {
+                    i += 1;
+                    continue;
+                }
+            };
+
+            let is_chunked = *slots.is_chunked.lock().unwrap();
+
+            // Check if handler promise has settled
             let outcome = match &pending[i].done {
                 Some(p) => match p.as_promise() {
                     Some(pr) => {
@@ -530,41 +804,116 @@ pub fn serve_loop(
                 },
                 None => Some(None),
             };
-            if let Some(reason) = outcome {
-                let mut pr = pending.remove(i);
-                completed = true;
-                let slots = pr.body.as_ref().cloned().unwrap_or_default();
-                match reason {
-                    // The handler (or its awaited python call) failed: 500
-                    // with the rejection reason as JSON.
-                    Some(err_val) => {
-                        let body = format!("{{\"error\": {}}}", serialize_value(&err_val));
-                        write_response_full(
-                            &mut pr.stream,
-                            500,
-                            Some("application/json"),
-                            &[],
-                            body.as_bytes(),
-                        );
+
+            let is_ended = *slots.ended.lock().unwrap();
+            let handler_ended = is_ended || outcome.is_some();
+
+            if is_chunked {
+                // Streaming chunked transfer
+                if !pending[i].headers_sent {
+                    let status = *slots.status.lock().unwrap();
+                    let status = if status == 0 { 200 } else { status };
+                    let ct = slots.content_type.lock().unwrap().clone();
+                    let extra = slots.headers.lock().unwrap().clone();
+                    let close_hdr = extra.iter().any(|(k, v)| {
+                        k.eq_ignore_ascii_case("connection") && v.eq_ignore_ascii_case("close")
+                    });
+                    if close_hdr {
+                        pending[i].keep_alive = false;
                     }
-                    None => {
-                        let body = slots
-                            .body
-                            .lock()
-                            .unwrap()
-                            .clone()
-                            .unwrap_or_else(|| b"ok".to_vec());
-                        let status = *slots.status.lock().unwrap();
-                        let status = if status == 0 { 200 } else { status };
-                        let ct = slots.content_type.lock().unwrap().clone();
-                        let extra = slots.headers.lock().unwrap().clone();
-                        write_response_full(&mut pr.stream, status, ct.as_deref(), &extra, &body);
-                    }
+                    let keep_alive = pending[i].keep_alive;
+                    write_chunked_response_headers(
+                        &mut pending[i].stream,
+                        status,
+                        ct.as_deref(),
+                        &extra,
+                        keep_alive,
+                    );
+                    pending[i].headers_sent = true;
                 }
-                // Dropping the request closes the connection (EOF for the
-                // client).
+
+                // Drain any available chunks
+                let chunks: Vec<Vec<u8>> = {
+                    let mut lock = slots.stream_chunks.lock().unwrap();
+                    std::mem::take(&mut *lock)
+                };
+                for chunk in chunks {
+                    write_chunk(&mut pending[i].stream, &chunk);
+                }
+
+                if handler_ended {
+                    finish_chunked_response(&mut pending[i].stream);
+                    completed = true;
+                    if pending[i].keep_alive {
+                        pending[i].started = false;
+                        pending[i].body = None;
+                        pending[i].done = None;
+                        pending[i].accepted_at = std::time::Instant::now();
+                        pending[i].headers_sent = false;
+                        i += 1;
+                    } else {
+                        pending.remove(i);
+                    }
+                } else {
+                    i += 1;
+                }
             } else {
-                i += 1;
+                // Non-chunked response: wait until handler settled or ended
+                let ready = outcome.is_some() || is_ended;
+                if ready {
+                    let mut pr = pending.remove(i);
+                    completed = true;
+                    let extra = slots.headers.lock().unwrap().clone();
+                    let close_hdr = extra.iter().any(|(k, v)| {
+                        k.eq_ignore_ascii_case("connection") && v.eq_ignore_ascii_case("close")
+                    });
+                    if close_hdr {
+                        pr.keep_alive = false;
+                    }
+                    match outcome.flatten() {
+                        Some(err_val) => {
+                            let body = format!("{{\"error\": {}}}", serialize_value(&err_val));
+                            write_response_full(
+                                &mut pr.stream,
+                                500,
+                                Some("application/json"),
+                                &[],
+                                body.as_bytes(),
+                                pr.keep_alive,
+                            );
+                        }
+                        None => {
+                            let body = slots
+                                .body
+                                .lock()
+                                .unwrap()
+                                .clone()
+                                .unwrap_or_else(|| b"ok".to_vec());
+                            let status = *slots.status.lock().unwrap();
+                            let status = if status == 0 { 200 } else { status };
+                            let ct = slots.content_type.lock().unwrap().clone();
+                            write_response_full(
+                                &mut pr.stream,
+                                status,
+                                ct.as_deref(),
+                                &extra,
+                                &body,
+                                pr.keep_alive,
+                            );
+                        }
+                    }
+                    if pr.keep_alive {
+                        pr.started = false;
+                        pr.body = None;
+                        pr.done = None;
+                        pr.accepted_at = std::time::Instant::now();
+                        pr.headers_sent = false;
+                        pending.insert(i, pr);
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
             }
         }
         // 5. Per-request unit boundary when anything completed this iteration:

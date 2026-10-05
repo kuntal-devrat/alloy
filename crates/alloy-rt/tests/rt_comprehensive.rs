@@ -121,4 +121,111 @@ fn server_config_clone() {
     let c = ServerConfig::default();
     let d = c.clone();
     assert_eq!(c.max_header_bytes, d.max_header_bytes);
+    assert!(c.workers >= 1);
+}
+
+#[test]
+fn server_with_workers_config() {
+    let s = HttpServer::new("127.0.0.1:0").with_workers(4);
+    let _ = s;
+}
+
+#[test]
+fn http_request_should_keep_alive() {
+    let req_close = HttpRequest {
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: vec![("Connection".to_string(), "close".to_string())],
+        body: vec![],
+        raw: vec![],
+    };
+    assert!(!req_close.should_keep_alive(true));
+
+    let req_ka = HttpRequest {
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: vec![("Connection".to_string(), "keep-alive".to_string())],
+        body: vec![],
+        raw: vec![],
+    };
+    assert!(req_ka.should_keep_alive(false));
+
+    let req_default = HttpRequest {
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: vec![],
+        body: vec![],
+        raw: vec![],
+    };
+    assert!(req_default.should_keep_alive(true));
+    assert!(!req_default.should_keep_alive(false));
+}
+
+#[test]
+fn server_reuseport_multi_worker_live() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    // Ephemeral port selection
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let addr = format!("127.0.0.1:{}", port);
+    let addr_clone = addr.clone();
+
+    let server_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async move {
+            let mut s = HttpServer::new(&addr_clone).with_workers(2);
+            s.set_typed_handler(|req: HttpRequest| {
+                format!("WORKER_ECHO:{}", req.path).into_bytes()
+            });
+            let _ = s.listen().await;
+        });
+    });
+
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Send 10 concurrent requests to the multi-worker server
+    let mut handles = Vec::new();
+    for i in 0..10 {
+        let addr = addr.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(&addr).expect("connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let req = format!(
+                "GET /item_{} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                i
+            );
+            stream.write_all(req.as_bytes()).unwrap();
+
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            let resp = String::from_utf8_lossy(&buf);
+            assert!(resp.contains("200 OK"), "expected 200 OK: {}", resp);
+            assert!(
+                resp.contains(&format!("WORKER_ECHO:/item_{}", i)),
+                "expected echo response: {}",
+                resp
+            );
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("client join");
+    }
 }

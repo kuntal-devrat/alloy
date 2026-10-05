@@ -12,6 +12,7 @@ pub struct ServerConfig {
     pub max_body_bytes: usize,
     pub keep_alive: bool,
     pub keep_alive_timeout: Duration,
+    pub workers: usize,
 }
 
 impl Default for ServerConfig {
@@ -23,6 +24,9 @@ impl Default for ServerConfig {
             max_body_bytes: 10 * 1024 * 1024,
             keep_alive: true,
             keep_alive_timeout: Duration::from_secs(5),
+            workers: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
         }
     }
 }
@@ -45,6 +49,18 @@ impl HttpRequest {
             }
         }
         None
+    }
+
+    pub fn should_keep_alive(&self, default_keep_alive: bool) -> bool {
+        if let Some(conn) = self.header("connection") {
+            if conn.eq_ignore_ascii_case("close") {
+                return false;
+            }
+            if conn.eq_ignore_ascii_case("keep-alive") {
+                return true;
+            }
+        }
+        default_keep_alive
     }
 }
 
@@ -71,6 +87,26 @@ fn parse_request(buf: &[u8]) -> Option<(HttpRequest, usize)> {
             headers.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
+    // Chunked Transfer-Encoding
+    let is_chunked = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
+    });
+    if is_chunked {
+        let (body, consumed) = alloy_vm::vm::http::decode_chunked_body(&buf[header_len..])?;
+        let total_needed = header_len + consumed;
+        let raw = buf[..total_needed].to_vec();
+        return Some((
+            HttpRequest {
+                method,
+                path,
+                headers,
+                body,
+                raw,
+            },
+            total_needed,
+        ));
+    }
+
     // Content-Length
     let content_length: usize = headers
         .iter()
@@ -121,6 +157,21 @@ fn build_response(
     out
 }
 
+fn bind_reuseport_listener(addr: std::net::SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv6() {
+        tokio::net::TcpSocket::new_v6()?
+    } else {
+        tokio::net::TcpSocket::new_v4()?
+    };
+    #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+    {
+        socket.set_reuseport(true)?;
+    }
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
 pub struct HttpServer {
     addr: String,
     config: ServerConfig,
@@ -143,6 +194,11 @@ impl HttpServer {
         self
     }
 
+    pub fn with_workers(mut self, workers: usize) -> Self {
+        self.config.workers = workers.max(1);
+        self
+    }
+
     pub fn set_handler<F>(&mut self, handler: F)
     where
         F: Fn(Vec<u8>) -> Vec<u8> + Send + Sync + 'static,
@@ -157,18 +213,22 @@ impl HttpServer {
         self.handler = Some(Arc::new(handler));
     }
 
-    pub async fn listen(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind(&self.addr).await?;
-        println!(
-            "[alloy] listening on {} (keep_alive={})",
-            self.addr, self.config.keep_alive
-        );
-        let typed = self.handler.clone();
-        let raw = self.raw_handler.clone();
-        let cfg = self.config.clone();
-
+    async fn run_accept_loop(
+        listener: TcpListener,
+        typed: Option<Arc<dyn Fn(HttpRequest) -> Vec<u8> + Send + Sync>>,
+        raw: Option<Arc<dyn Fn(Vec<u8>) -> Vec<u8> + Send + Sync>>,
+        cfg: ServerConfig,
+    ) {
         loop {
-            let (mut stream, addr) = listener.accept().await?;
+            let (mut stream, addr) = match listener.accept().await {
+                Ok(c) => c,
+                Err(e) => {
+                    if std::env::var_os("ALLOY_TRACE").is_some() {
+                        eprintln!("[alloy] accept error: {}", e);
+                    }
+                    continue;
+                }
+            };
             if std::env::var_os("ALLOY_TRACE").is_some() {
                 eprintln!("[alloy] connection from {}", addr);
             }
@@ -179,15 +239,16 @@ impl HttpServer {
                 let mut buf = Vec::with_capacity(8192);
                 let mut tmp = vec![0u8; 8192];
                 'conn: loop {
-                    // Try parse requests (supports pipelining: processes all complete requests in buffer)
                     let mut consumed = 0usize;
                     let mut parsed_any = false;
+                    let mut should_keep_conn = cfg.keep_alive;
                     while let Some((req, needed)) = parse_request(&buf[consumed..]) {
                         parsed_any = true;
+                        let keep_alive = cfg.keep_alive && req.should_keep_alive(cfg.keep_alive);
+                        should_keep_conn = keep_alive;
                         let response = if let Some(h) = &typed {
                             h(req)
                         } else if let Some(h) = &raw {
-                            // raw handler compat: receives raw bytes
                             let raw_bytes = buf[consumed..consumed + needed].to_vec();
                             h(raw_bytes)
                         } else {
@@ -196,10 +257,9 @@ impl HttpServer {
                                 "OK",
                                 &[("Content-Type", "text/plain")],
                                 b"Hello, alloy!",
-                                cfg.keep_alive,
+                                keep_alive,
                             )
                         };
-                        // Ensure response is framed; if handler returned only body, frame it
                         let framed = if response.starts_with(b"HTTP/") {
                             response
                         } else {
@@ -208,7 +268,7 @@ impl HttpServer {
                                 "OK",
                                 &[("Content-Type", "text/plain")],
                                 &response,
-                                cfg.keep_alive,
+                                keep_alive,
                             )
                         };
                         if timeout(cfg.write_timeout, stream.write_all(&framed))
@@ -221,7 +281,7 @@ impl HttpServer {
                             break 'conn;
                         }
                         consumed += needed;
-                        if !cfg.keep_alive {
+                        if !keep_alive {
                             let _ = stream.shutdown().await;
                             return;
                         }
@@ -231,11 +291,10 @@ impl HttpServer {
                         buf.drain(..consumed);
                     }
 
-                    if parsed_any && !cfg.keep_alive {
+                    if parsed_any && !should_keep_conn {
                         break 'conn;
                     }
 
-                    // Check size limits on unparsed data
                     if buf.len() > cfg.max_header_bytes + cfg.max_body_bytes {
                         let resp = build_response(
                             413,
@@ -260,7 +319,6 @@ impl HttpServer {
                         break 'conn;
                     }
 
-                    // If we already parsed at least one request and the buffer is empty, wait with keep_alive_timeout
                     let wait_timeout = if parsed_any && buf.is_empty() {
                         cfg.keep_alive_timeout
                     } else {
@@ -269,14 +327,83 @@ impl HttpServer {
 
                     let read_fut = stream.read(&mut tmp);
                     let n = match timeout(wait_timeout, read_fut).await {
-                        Ok(Ok(0)) => break 'conn, // EOF
+                        Ok(Ok(0)) => break 'conn,
                         Ok(Ok(n)) => n,
-                        Ok(Err(_)) => break 'conn, // error
-                        Err(_) => break 'conn,     // timeout
+                        Ok(Err(_)) => break 'conn,
+                        Err(_) => break 'conn,
                     };
                     buf.extend_from_slice(&tmp[..n]);
                 }
             });
+        }
+    }
+
+    pub async fn listen(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use std::net::ToSocketAddrs;
+        let socket_addr = self.addr.to_socket_addrs()?.next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid address")
+        })?;
+
+        let workers = self.config.workers;
+        if workers > 1 {
+            println!(
+                "[alloy] listening on {} (workers={}, SO_REUSEPORT=enabled, keep_alive={})",
+                self.addr, workers, self.config.keep_alive
+            );
+
+            let mut handles = Vec::with_capacity(workers);
+            for worker_id in 0..workers {
+                let typed = self.handler.clone();
+                let raw = self.raw_handler.clone();
+                let cfg = self.config.clone();
+                let addr = socket_addr;
+
+                let handle = std::thread::Builder::new()
+                    .name(format!("alloy-worker-{}", worker_id))
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("failed to create worker runtime");
+
+                        rt.block_on(async move {
+                            let listener = match bind_reuseport_listener(addr) {
+                                Ok(l) => l,
+                                Err(e) => {
+                                    eprintln!(
+                                        "[alloy] worker {} failed to bind SO_REUSEPORT: {}",
+                                        worker_id, e
+                                    );
+                                    return;
+                                }
+                            };
+                            Self::run_accept_loop(listener, typed, raw, cfg).await;
+                        });
+                    })?;
+                handles.push(handle);
+            }
+
+            for h in handles {
+                let _ = h.join();
+            }
+            Ok(())
+        } else {
+            let listener = match bind_reuseport_listener(socket_addr) {
+                Ok(l) => l,
+                Err(_) => TcpListener::bind(socket_addr).await?,
+            };
+            println!(
+                "[alloy] listening on {} (single-worker, keep_alive={})",
+                self.addr, self.config.keep_alive
+            );
+            Self::run_accept_loop(
+                listener,
+                self.handler.clone(),
+                self.raw_handler.clone(),
+                self.config.clone(),
+            )
+            .await;
+            Ok(())
         }
     }
 }

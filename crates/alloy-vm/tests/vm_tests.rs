@@ -3658,3 +3658,210 @@ fn json_deep_nesting_depth_limit() {
     let out = run_lines(&src);
     assert!(out.contains("CAUGHT DEPTH ERROR: SyntaxError: JSON structure too deeply nested"));
 }
+
+fn read_http_response(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&buf[..header_end]);
+            let body_start = header_end + 4;
+            let is_chunked = headers.lines().any(|l| {
+                let lower = l.to_ascii_lowercase();
+                lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+            });
+            if is_chunked {
+                if alloy_vm::vm::http::decode_chunked_body(&buf[body_start..]).is_some() {
+                    break;
+                }
+            } else {
+                let content_len = headers
+                    .lines()
+                    .find_map(|l| {
+                        let lower = l.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if buf.len() >= body_start + content_len {
+                    break;
+                }
+            }
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+#[test]
+fn http_chunked_streaming_request_and_response() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let (listener, port) = alloy_vm::vm::http::bind_server(0).expect("bind");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+
+    let server = std::thread::spawn(move || {
+        let src = r#"
+            function handle(req, res) {
+                if (req.path === "/stream") {
+                    res.set("Content-Type", "text/plain");
+                    res.write("part1-");
+                    res.write("part2-");
+                    res.end("part3");
+                    return;
+                }
+                if (req.path === "/upload") {
+                    res.status(200).json({ received: req.body });
+                    return;
+                }
+            }
+        "#;
+        let program = Compiler::compile_source_with_mode(src, true, false).expect("compile");
+        let mut vm = Vm::new(program);
+        vm.run();
+        let handler = vm.get_global("handle").expect("handle global");
+        alloy_vm::vm::http::serve_loop(&mut vm, &handler, listener, &stop_clone);
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // 1. Test streaming response (res.write + res.end)
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let resp = read_http_response(&mut stream).expect("read response");
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "expected chunked header in response: {}",
+            resp
+        );
+        assert!(
+            resp.contains("part1-") && resp.contains("part2-") && resp.contains("part3"),
+            "expected streamed chunks in body: {}",
+            resp
+        );
+        assert!(
+            resp.ends_with("0\r\n\r\n"),
+            "expected chunked termination 0\\r\\n\\r\\n: {}",
+            resp
+        );
+    }
+
+    // 2. Test chunked request upload (Transfer-Encoding: chunked decode)
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let chunked_req = "POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        stream.write_all(chunked_req.as_bytes()).unwrap();
+        let resp = read_http_response(&mut stream).expect("read upload response");
+        assert!(resp.contains("200 OK"), "expected 200 OK: {}", resp);
+        assert!(
+            resp.contains("\"received\": \"hello world\""),
+            "expected decoded body in response: {}",
+            resp
+        );
+    }
+
+    stop.store(true, Ordering::SeqCst);
+    let _ = server.join();
+}
+
+#[test]
+fn http_keep_alive_connection_reuse() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let (listener, port) = alloy_vm::vm::http::bind_server(0).expect("bind");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+
+    let server = std::thread::spawn(move || {
+        let src = r#"
+            let count = 0;
+            function handle(req, res) {
+                count++;
+                res.status(200).json({ reqNum: count, path: req.path });
+            }
+        "#;
+        let program = Compiler::compile_source_with_mode(src, true, false).expect("compile");
+        let mut vm = Vm::new(program);
+        vm.run();
+        let handler = vm.get_global("handle").expect("handle global");
+        alloy_vm::vm::http::serve_loop(&mut vm, &handler, listener, &stop_clone);
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Open ONE TCP connection and make multiple consecutive requests across it
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+
+    // Request 1: keep-alive (default HTTP/1.1)
+    stream
+        .write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let resp1 = read_http_response(&mut stream).expect("read resp1");
+    assert!(resp1.contains("200 OK"), "resp1 status: {}", resp1);
+    assert!(
+        resp1.contains("Connection: keep-alive"),
+        "expected keep-alive header in resp1: {}",
+        resp1
+    );
+    assert!(resp1.contains("\"reqNum\": 1"), "resp1 body: {}", resp1);
+
+    // Request 2 on the SAME socket: connection reuse!
+    stream
+        .write_all(b"GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let resp2 = read_http_response(&mut stream).expect("read resp2");
+    assert!(resp2.contains("200 OK"), "resp2 status: {}", resp2);
+    assert!(
+        resp2.contains("Connection: keep-alive"),
+        "expected keep-alive header in resp2: {}",
+        resp2
+    );
+    assert!(resp2.contains("\"reqNum\": 2"), "resp2 body: {}", resp2);
+
+    // Request 3 with Connection: close
+    stream
+        .write_all(b"GET /third HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let resp3 = read_http_response(&mut stream).expect("read resp3");
+    assert!(resp3.contains("200 OK"), "resp3 status: {}", resp3);
+    assert!(
+        resp3.contains("Connection: close"),
+        "expected Connection: close in resp3: {}",
+        resp3
+    );
+    assert!(resp3.contains("\"reqNum\": 3"), "resp3 body: {}", resp3);
+
+    // Socket should now be closed by the server (EOF on next read)
+    let mut check_buf = [0u8; 16];
+    let n = stream.read(&mut check_buf).unwrap_or(0);
+    assert_eq!(n, 0, "expected EOF after Connection: close");
+
+    stop.store(true, Ordering::SeqCst);
+    let _ = server.join();
+}

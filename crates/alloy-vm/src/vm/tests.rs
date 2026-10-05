@@ -22,6 +22,32 @@ fn embed_mode() -> bool {
     std::env::var("ALLOY_PYTHON_EMBED").as_deref() == Ok("1")
 }
 
+fn response_complete(buf: &[u8]) -> bool {
+    let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers_str = String::from_utf8_lossy(&buf[..header_end]);
+    let body_start = header_end + 4;
+    let is_chunked = headers_str.lines().any(|l| {
+        let lower = l.to_ascii_lowercase();
+        lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+    });
+    if is_chunked {
+        crate::vm::builtins::http_server::decode_chunked_body(&buf[body_start..]).is_some()
+    } else {
+        let content_len = headers_str
+            .lines()
+            .find_map(|l| {
+                let lower = l.to_ascii_lowercase();
+                lower
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        buf.len() >= body_start + content_len
+    }
+}
+
 /// One HTTP request/response round-trip for the server tests. A read
 /// timeout turns a stalled server into an error instead of a hang.
 fn http_client(port: u16, path: &str) -> std::io::Result<String> {
@@ -31,6 +57,9 @@ fn http_client(port: u16, path: &str) -> std::io::Result<String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
+        if response_complete(&buf) {
+            break;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
@@ -3403,6 +3432,9 @@ fn server_concurrent_await_python() {
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
                 loop {
+                    if response_complete(&buf) {
+                        break;
+                    }
                     match stream.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(n) => buf.extend_from_slice(&chunk[..n]),
@@ -4056,6 +4088,9 @@ fn http_raw(port: u16, req: &str) -> std::io::Result<String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
+        if response_complete(&buf) {
+            break;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
