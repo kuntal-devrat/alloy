@@ -279,11 +279,7 @@ fn starts_with_word(chars: &[char], idx: usize, word: &str) -> bool {
         return false;
     }
     let end = idx + wchars.len();
-    if end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '$')
-    {
-        return false;
-    }
-    true
+    !(end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '$'))
 }
 
 fn skip_whitespace(chars: &[char], mut idx: usize) -> usize {
